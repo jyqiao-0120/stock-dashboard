@@ -1022,7 +1022,7 @@ document.getElementById('mgrWatch').addEventListener('input',e=>{
       tr.querySelector('[data-auto="wtarget"]').textContent=t.targetMean?'$'+t.targetMean:'—';
     }catch(e){}
   },600);
-};
+});
 document.getElementById('mgrRows').addEventListener('click',e=>{if(e.target.closest('.mgr-del'))e.target.closest('tr').remove();});
 // 输入代码时自动带出行业/现价/目标价
 document.getElementById('mgrRows').addEventListener('input',e=>{
