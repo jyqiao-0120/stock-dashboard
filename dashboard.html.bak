@@ -368,7 +368,7 @@ const CONFIG = {
    界面与计算层完全不用改。
    ===================================================================== */
 const USE_MOCK = false;
-const PROXY = 'http://localhost:8787';
+const PROXY = 'https://stock-proxy-t2c4.onrender.com';
 const API = { key:'YOUR_API_KEY', base:'https://finnhub.io/api/v1' }; // 自备 key
 
 /* 可编辑数据 store：手动维护的持仓 / 市场参数存这里。
@@ -386,15 +386,57 @@ function saveStore(key, val){
 const DataProvider = {
   async getMarket(){
     if(USE_MOCK) return store.market;
-    // 真实：指数/VIX/美债/美元，可用 Finnhub /quote 或 Polygon /aggs
-    // const r = await fetch(`${API.base}/quote?symbol=^GSPC&token=${API.key}`); ...
+    try {
+      const syms = ['SPY','QQQ','DIA','IWM','VIX'];
+      const data = await (await fetch(`${PROXY}/api/batch?syms=${syms.join(',')}`)).json();
+      const find = s => data.find(x => x.sym === s) || {};
+      return {
+        ...store.market,
+        asOf: new Date().toLocaleString('zh-CN'),
+        vix: find('VIX').c || store.market.vix,
+        indices: [
+          {sym:'S&P 500',  val: find('SPY').c*10||store.market.indices[0].val, chg: find('SPY').dp||0},
+          {sym:'Nasdaq',   val: find('QQQ').c*40||store.market.indices[1].val, chg: find('QQQ').dp||0},
+          {sym:'Dow',      val: find('DIA').c*100||store.market.indices[2].val,chg: find('DIA').dp||0},
+          {sym:'Russell2K',val: find('IWM').c*10||store.market.indices[3].val, chg: find('IWM').dp||0},
+          {sym:'VIX',      val: find('VIX').c||store.market.vix,               chg: find('VIX').dp||0},
+          ...store.market.indices.slice(5),
+        ],
+      };
+    } catch(e) { console.warn('getMarket 降级 mock', e); return store.market; }
   },
   async getPortfolio(){
     if(USE_MOCK) return store.portfolio;
-    // 真实：券商持仓 API（如 Alpaca /v2/positions），逐票再调 /quote 补行情
+    try {
+      let base=store.portfolio.positions, cash=store.portfolio.cash;
+      try{
+        const h=await fetch(`${PROXY}/api/holdings`).then(r=>r.json());
+        if(h.positions){base=h.positions;cash=h.cash;
+          store.portfolio.positions=base;store.portfolio.cash=cash;
+          saveStore('portfolio',store.portfolio);}
+      }catch(e){console.warn('holdings API失败，用本地数据');}
+      const positions=await Promise.all(base.map(async h=>{
+        const [q,m,t,prof]=await Promise.all([
+          fetch(`${PROXY}/api/quote/${h.sym}`).then(r=>r.json()).catch(()=>({})),
+          fetch(`${PROXY}/api/metrics/${h.sym}`).then(r=>r.json()).catch(()=>({})),
+          fetch(`${PROXY}/api/target/${h.sym}`).then(r=>r.json()).catch(()=>({})),
+          fetch(`${PROXY}/api/profile/${h.sym}`).then(r=>r.json()).catch(()=>({})),
+        ]);
+        const ref=fetchSymbolRef(h.sym)||{};
+        return{...h,
+          sector:prof.finnhubIndustry||ref.sector||h.sector||'其他',
+          price:q.c||ref.price||h.price||0, chg:q.dp||0,
+          high:m.metric?.['52WeekHigh']||ref.high||h.high||q.c||0,
+          target:t.targetMean||ref.target||h.target||q.c||0,
+          rsi:ref.rsi||h.rsi||50, atr:ref.atr||h.atr||(q.c||0)*0.03,
+          earnDays:ref.earnDays||h.earnDays||99,
+        };
+      }));
+      return{...store.portfolio,cash,positions};
+    }catch(e){console.warn('getPortfolio 降级 mock',e);return store.portfolio;}
   },
   async getEvents(){
-    if(USE_MOCK) return mock.events;
+    return mock.events;
     // 真实：宏观日历(如 Trading Economics / Finnhub /calendar/economic)
     //       + 个股财报日(Finnhub /calendar/earnings)
   },
@@ -404,10 +446,10 @@ const DataProvider = {
   },
   async getSnapshot(){
     // 上次查看快照：实盘时存 localStorage / 后端；原型用 mock
-    if(USE_MOCK) return mock.snapshot;
+    return mock.snapshot;
   },
   async getDipLeaders(){
-    if(USE_MOCK) return mock.dipLeaders;
+    return mock.dipLeaders;
     // 真实：先用筛选器找“距52周高回撤大 + 大市值龙头”（如 Finnhub /stock/metric 取 52WeekHigh/Low），
     //       目标价取分析师共识 /stock/price-target，看涨逻辑可结合基本面或人工维护
   },
@@ -652,7 +694,7 @@ async function load(){
 
 function render(){
   const {market,port,pos,panic,sw,vixSig,alerts,actions,events,pfRaw,dips}=state;
-  document.getElementById('upd').textContent='数据截至 '+market.asOf+' · 模拟数据';
+  document.getElementById('upd').textContent='数据截至 '+market.asOf+' · '+(USE_MOCK ? '模拟数据' : '实时数据');
 
   // ticker
   document.getElementById('ticker').innerHTML=market.indices.map(i=>{
@@ -865,11 +907,34 @@ function mgrRow(p){
     <td><button class="mgr-del" title="删除">✕</button></td>
   </tr>`;
 }
-function openManage(){
-  const pf=store.portfolio;
+async function openManage(){
+  let pf=store.portfolio;
+  if(!USE_MOCK){
+    try{
+      const h=await fetch(`${PROXY}/api/holdings`).then(r=>r.json());
+      if(h.positions){pf={...store.portfolio,positions:h.positions,cash:h.cash};}
+    }catch(e){console.warn('加载持仓失败，使用本地数据');}
+  }
   document.getElementById('mgrRows').innerHTML=pf.positions.map(mgrRow).join('');
   document.getElementById('mgrCash').value=pf.cash;
   document.getElementById('manageModal').classList.add('on');
+  if(!USE_MOCK){
+    const rows=document.querySelectorAll('#mgrRows tr');
+    pf.positions.forEach((p,i)=>{
+      if(!rows[i]||fetchSymbolRef(p.sym)) return;
+      const tr=rows[i];
+      tr.querySelector('[data-auto="price"]').textContent='…';
+      Promise.all([
+        fetch(`${PROXY}/api/quote/${p.sym}`).then(r=>r.json()),
+        fetch(`${PROXY}/api/target/${p.sym}`).then(r=>r.json()),
+        fetch(`${PROXY}/api/profile/${p.sym}`).then(r=>r.json()),
+      ]).then(([q,t,prof])=>{
+        tr.querySelector('[data-auto="sector"]').textContent=prof.finnhubIndustry||'—';
+        tr.querySelector('[data-auto="price"]').textContent=q.c?'$'+q.c:'—';
+        tr.querySelector('[data-auto="target"]').textContent=t.targetMean?'$'+t.targetMean:'—';
+      }).catch(()=>{tr.querySelector('[data-auto="price"]').textContent='—';});
+    });
+  }
 }
 function closeManage(){document.getElementById('manageModal').classList.remove('on');}
 function saveManage(){
@@ -895,6 +960,12 @@ function saveManage(){
   store.portfolio.positions=positions;
   store.portfolio.cash=+document.getElementById('mgrCash').value||0;
   saveStore('portfolio',store.portfolio);
+    if(!USE_MOCK){
+    const syncData={cash:store.portfolio.cash,positions:positions.map(({sym,name,shares,cost})=>({sym,name,shares,cost}))};
+    fetch(`${PROXY}/api/holdings`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(syncData)})
+      .then(r=>r.json()).then(d=>{if(d.ok)console.log('✓ 持仓已同步到GitHub');else console.warn('同步失败',d);})
+      .catch(e=>console.warn('同步到GitHub失败',e));
+  }
   closeManage(); load();
 }
 document.getElementById('manageBtn').onclick=openManage;
@@ -905,10 +976,35 @@ document.getElementById('mgrRows').addEventListener('click',e=>{if(e.target.clos
 // 输入代码时自动带出行业/现价/目标价
 document.getElementById('mgrRows').addEventListener('input',e=>{
   if(!e.target.classList.contains('sym-in')) return;
-  const tr=e.target.closest('tr'), ref=fetchSymbolRef(e.target.value);
-  tr.querySelector('[data-auto="sector"]').textContent=ref?ref.sector:'—';
-  tr.querySelector('[data-auto="price"]').textContent=ref?'$'+ref.price:'—';
-  tr.querySelector('[data-auto="target"]').textContent=ref?'$'+ref.target:'—';
+  const tr=e.target.closest('tr');
+  const sym=e.target.value.trim().toUpperCase();
+  const ref=fetchSymbolRef(sym);
+  if(ref){
+    tr.querySelector('[data-auto="sector"]').textContent=ref.sector;
+    tr.querySelector('[data-auto="price"]').textContent='$'+ref.price;
+    tr.querySelector('[data-auto="target"]').textContent='$'+ref.target;
+  } else if(!USE_MOCK && sym.length>=1){
+    tr.querySelector('[data-auto="price"]').textContent='查询中…';
+    clearTimeout(tr._qt);
+    tr._qt=setTimeout(async()=>{
+      try{
+        const [q,t,prof]=await Promise.all([
+          fetch(`${PROXY}/api/quote/${sym}`).then(r=>r.json()),
+          fetch(`${PROXY}/api/target/${sym}`).then(r=>r.json()),
+          fetch(`${PROXY}/api/profile/${sym}`).then(r=>r.json()),
+        ]);
+        tr.querySelector('[data-auto="sector"]').textContent=prof.finnhubIndustry||'—';
+        tr.querySelector('[data-auto="price"]').textContent=q.c?'$'+q.c:'—';
+        tr.querySelector('[data-auto="target"]').textContent=t.targetMean?'$'+t.targetMean:'—';
+      }catch(e){
+        tr.querySelector('[data-auto="price"]').textContent='—';
+      }
+    },600);
+  } else {
+    tr.querySelector('[data-auto="sector"]').textContent='—';
+    tr.querySelector('[data-auto="price"]').textContent='—';
+    tr.querySelector('[data-auto="target"]').textContent='—';
+  }
 });
 document.getElementById('mgrSave').onclick=saveManage;
 document.getElementById('mgrReset').onclick=()=>{

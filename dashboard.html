@@ -317,7 +317,19 @@ button{font-family:inherit;cursor:pointer}
       <th style="width:40px"></th>
     </tr></thead><tbody id="mgrRows"></tbody></table>
   </div>
-  <button class="mgr-add" id="mgrAdd">+ 添加一只股票</button>
+  <button class="mgr-add" id="mgrAdd">+ 添加持仓</button>
+
+  <div class="mgr-sec" style="margin-top:22px">关注清单（待买入）</div>
+  <div style="overflow-x:auto">
+    <table class="mgr-table"><thead><tr>
+      <th style="width:78px">代码</th><th>名称</th>
+      <th style="width:200px">备注（目标买入价等）</th>
+      <th style="width:74px">现价<span class="hint">自动</span></th>
+      <th style="width:74px">目标价<span class="hint">自动</span></th>
+      <th style="width:40px"></th>
+    </tr></thead><tbody id="mgrWatch"></tbody></table>
+  </div>
+  <button class="mgr-add" id="mgrWatchAdd">+ 添加关注</button>
 
   <div class="mgr-sec">现金</div>
   <div class="mgr-params">
@@ -408,32 +420,22 @@ const DataProvider = {
   async getPortfolio(){
     if(USE_MOCK) return store.portfolio;
     try {
-      let base=store.portfolio.positions, cash=store.portfolio.cash;
-      try{
-        const h=await fetch(`${PROXY}/api/holdings`).then(r=>r.json());
-        if(h.positions){base=h.positions;cash=h.cash;
-          store.portfolio.positions=base;store.portfolio.cash=cash;
-          saveStore('portfolio',store.portfolio);}
-      }catch(e){console.warn('holdings API失败，用本地数据');}
-      const positions=await Promise.all(base.map(async h=>{
-        const [q,m,t,prof]=await Promise.all([
-          fetch(`${PROXY}/api/quote/${h.sym}`).then(r=>r.json()).catch(()=>({})),
-          fetch(`${PROXY}/api/metrics/${h.sym}`).then(r=>r.json()).catch(()=>({})),
-          fetch(`${PROXY}/api/target/${h.sym}`).then(r=>r.json()).catch(()=>({})),
-          fetch(`${PROXY}/api/profile/${h.sym}`).then(r=>r.json()).catch(()=>({})),
+      const positions = await Promise.all(store.portfolio.positions.map(async h => {
+        const [q, m, t] = await Promise.all([
+          fetch(`${PROXY}/api/quote/${h.sym}`).then(r=>r.json()),
+          fetch(`${PROXY}/api/metrics/${h.sym}`).then(r=>r.json()),
+          fetch(`${PROXY}/api/target/${h.sym}`).then(r=>r.json()),
         ]);
-        const ref=fetchSymbolRef(h.sym)||{};
-        return{...h,
-          sector:prof.finnhubIndustry||ref.sector||h.sector||'其他',
-          price:q.c||ref.price||h.price||0, chg:q.dp||0,
-          high:m.metric?.['52WeekHigh']||ref.high||h.high||q.c||0,
-          target:t.targetMean||ref.target||h.target||q.c||0,
-          rsi:ref.rsi||h.rsi||50, atr:ref.atr||h.atr||(q.c||0)*0.03,
-          earnDays:ref.earnDays||h.earnDays||99,
+        return {
+          ...h,
+          price:  q.c  || h.price,
+          chg:    q.dp || 0,
+          high:   m.metric?.['52WeekHigh'] || h.high || q.c,
+          target: t.targetMean || h.target || q.c,
         };
       }));
-      return{...store.portfolio,cash,positions};
-    }catch(e){console.warn('getPortfolio 降级 mock',e);return store.portfolio;}
+      return { ...store.portfolio, positions };
+    } catch(e) { console.warn('getPortfolio 降级 mock', e); return store.portfolio; }
   },
   async getEvents(){
     return mock.events;
@@ -917,6 +919,28 @@ async function openManage(){
   }
   document.getElementById('mgrRows').innerHTML=pf.positions.map(mgrRow).join('');
   document.getElementById('mgrCash').value=pf.cash;
+  // 加载关注清单
+  const wl = pf.watchlist||[];
+  document.getElementById('mgrWatch').innerHTML=wl.map(w=>
+    `<tr>
+      <td><input class="sym-in" data-w="sym" value="${w.sym||''}" placeholder="TSLA"></td>
+      <td><input data-w="name" value="${w.name||''}" placeholder="特斯拉"></td>
+      <td><input data-w="note" value="${w.note||''}" placeholder="回调至$xxx可建仓" style="width:100%"></td>
+      <td class="auto" data-auto="wprice">—</td>
+      <td class="auto" data-auto="wtarget">—</td>
+      <td><button class="mgr-del">✕</button></td>
+    </tr>`
+  ).join('');
+  if(!USE_MOCK){
+    document.querySelectorAll('#mgrWatch tr').forEach((tr,i)=>{
+      const sym=wl[i]?.sym; if(!sym) return;
+      const ref=fetchSymbolRef(sym);
+      if(ref){tr.querySelector('[data-auto="wprice"]').textContent='$'+ref.price;tr.querySelector('[data-auto="wtarget"]').textContent='$'+ref.target;return;}
+      Promise.all([fetch(`${PROXY}/api/quote/${sym}`).then(r=>r.json()),fetch(`${PROXY}/api/target/${sym}`).then(r=>r.json())])
+        .then(([q,t])=>{tr.querySelector('[data-auto="wprice"]').textContent=q.c?'$'+q.c:'—';tr.querySelector('[data-auto="wtarget"]').textContent=t.targetMean?'$'+t.targetMean:'—';})
+        .catch(()=>{});
+    });
+  }
   document.getElementById('manageModal').classList.add('on');
   if(!USE_MOCK){
     const rows=document.querySelectorAll('#mgrRows tr');
@@ -961,7 +985,12 @@ function saveManage(){
   store.portfolio.cash=+document.getElementById('mgrCash').value||0;
   saveStore('portfolio',store.portfolio);
     if(!USE_MOCK){
-    const syncData={cash:store.portfolio.cash,positions:positions.map(({sym,name,shares,cost})=>({sym,name,shares,cost}))};
+    const watchlist=[...document.querySelectorAll('#mgrWatch tr')].map(tr=>({
+    sym:(tr.querySelector('[data-w="sym"]')?.value||'').toUpperCase(),
+    name:tr.querySelector('[data-w="name"]')?.value||'',
+    note:tr.querySelector('[data-w="note"]')?.value||'',
+  })).filter(w=>w.sym);
+  const syncData={cash:store.portfolio.cash,positions:positions.map(({sym,name,shares,cost})=>({sym,name,shares,cost})),watchlist};
     fetch(`${PROXY}/api/holdings`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(syncData)})
       .then(r=>r.json()).then(d=>{if(d.ok)console.log('✓ 持仓已同步到GitHub');else console.warn('同步失败',d);})
       .catch(e=>console.warn('同步到GitHub失败',e));
@@ -972,6 +1001,28 @@ document.getElementById('manageBtn').onclick=openManage;
 document.getElementById('manageClose').onclick=closeManage;
 document.getElementById('manageModal').addEventListener('click',e=>{if(e.target.id==='manageModal')closeManage();});
 document.getElementById('mgrAdd').onclick=()=>{document.getElementById('mgrRows').insertAdjacentHTML('beforeend',mgrRow());};
+document.getElementById('mgrWatchAdd').onclick=()=>{
+  document.getElementById('mgrWatch').insertAdjacentHTML('beforeend',
+    `<tr><td><input class="sym-in" data-w="sym" placeholder="TSLA"></td>
+    <td><input data-w="name" placeholder="特斯拉"></td>
+    <td><input data-w="note" placeholder="备注"></td>
+    <td class="auto" data-auto="wprice">—</td>
+    <td class="auto" data-auto="wtarget">—</td>
+    <td><button class="mgr-del">✕</button></td></tr>`
+  );
+};
+document.getElementById('mgrWatch').addEventListener('input',e=>{
+  if(!e.target.dataset.w==='sym'||!e.target.classList.contains('sym-in')) return;
+  const tr=e.target.closest('tr'); const sym=e.target.value.trim().toUpperCase(); if(!sym) return;
+  clearTimeout(tr._wqt);
+  tr._wqt=setTimeout(async()=>{
+    try{
+      const [q,t]=await Promise.all([fetch(`${PROXY}/api/quote/${sym}`).then(r=>r.json()),fetch(`${PROXY}/api/target/${sym}`).then(r=>r.json())]);
+      tr.querySelector('[data-auto="wprice"]').textContent=q.c?'$'+q.c:'—';
+      tr.querySelector('[data-auto="wtarget"]').textContent=t.targetMean?'$'+t.targetMean:'—';
+    }catch(e){}
+  },600);
+};
 document.getElementById('mgrRows').addEventListener('click',e=>{if(e.target.closest('.mgr-del'))e.target.closest('tr').remove();});
 // 输入代码时自动带出行业/现价/目标价
 document.getElementById('mgrRows').addEventListener('input',e=>{
