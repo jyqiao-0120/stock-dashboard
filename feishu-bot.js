@@ -25,15 +25,10 @@ const ENV = {
   CRON: process.env.CRON || '30 21 * * 1-5',                      // 默认北京时间周一到周五 21:30（约美股开盘后）
 };
 
-/* ---------- 你手动维护的持仓（代码 + 股数 + 成本）。其余字段自动拉取 ---------- */
-const HOLDINGS = [
-  { sym: 'NVDA', shares: 140, cost: 96.2 },
-  { sym: 'AAPL', shares: 90,  cost: 182.0 },
-  { sym: 'MSFT', shares: 38,  cost: 388.5 },
-  { sym: 'XOM',  shares: 80,  cost: 104.0 },
-  { sym: 'PLTR', shares: 600, cost: 24.8 },
-];
-const CASH = 18400;
+/* ---------- 持仓从 holdings.json 读取，只需维护那一个文件 ---------- */
+const _hdata = require('./holdings.json');
+const HOLDINGS = _hdata.positions;
+const CASH = _hdata.cash;
 
 /* ---------- 计算参数（与看板 CONFIG 保持一致，可调） ---------- */
 const CONFIG = {
