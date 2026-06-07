@@ -684,7 +684,7 @@ async function load(){
 
 function render(){
   const {market,port,pos,panic,sw,vixSig,alerts,actions,events,pfRaw,dips}=state;
-  document.getElementById('upd').textContent='数据截至 '+market.asOf+' · 模拟数据';
+  document.getElementById('upd').textContent='数据截至 '+market.asOf+' · '+(USE_MOCK ? '模拟数据' : '实时数据');
 
   // ticker
   document.getElementById('ticker').innerHTML=market.indices.map(i=>{
