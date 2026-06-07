@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: stock-proxy
+    runtime: node
+    buildCommand: npm install
+    startCommand: node proxy.js
+    envVars:
+      - key: FINNHUB_KEY
+        sync: false
