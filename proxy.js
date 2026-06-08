@@ -67,5 +67,35 @@ app.post('/api/holdings', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ===== Twelve Data：技术指标 RSI / ATR / VIX =====
+const TWELVE = process.env.TWELVE_KEY;
+const TD = 'https://api.twelvedata.com';
+
+app.get('/api/rsi/:sym', async (req, res) => {
+  try {
+    const r = await fetch(`${TD}/rsi?symbol=${req.params.sym}&interval=1day&time_period=14&apikey=${TWELVE}`);
+    const j = await r.json();
+    const v = j.values?.[0]?.rsi;
+    res.json({ rsi: v ? Math.round(+v) : null });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/atr/:sym', async (req, res) => {
+  try {
+    const r = await fetch(`${TD}/atr?symbol=${req.params.sym}&interval=1day&time_period=14&apikey=${TWELVE}`);
+    const j = await r.json();
+    const v = j.values?.[0]?.atr;
+    res.json({ atr: v ? +(+v).toFixed(2) : null });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// VIX 指数（用于 ④）
+app.get('/api/vix', async (req, res) => {
+  try {
+    const r = await fetch(`${TD}/quote?symbol=VIX&apikey=${TWELVE}`);
+    const j = await r.json();
+    res.json({ vix: j.close ? +(+j.close).toFixed(1) : null });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 const PORT = process.env.PORT || 8787;
 app.listen(PORT, () => console.log(`✓ 代理已启动：http://localhost:${PORT}`));
