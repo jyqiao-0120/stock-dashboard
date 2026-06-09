@@ -381,6 +381,7 @@ const CONFIG = {
    ===================================================================== */
 const USE_MOCK = false;
 const PROXY = 'https://stock-proxy-t2c4.onrender.com';
+const USE_AI = true;   // 是否调用 AI 做综合分析（建议仓位/恐慌/点评）。代理未配置 AI 时会自动回退到规则引擎
 const API = { key:'YOUR_API_KEY', base:'https://finnhub.io/api/v1' }; // 自备 key
 
 /* 可编辑数据 store：手动维护的持仓 / 市场参数存这里。
@@ -399,48 +400,60 @@ const DataProvider = {
   async getMarket(){
     if(USE_MOCK) return store.market;
     try {
-      const syms = ['SPY','QQQ','DIA','IWM','VIX'];
+      const syms = ['SPY','QQQ','DIA','IWM','VIXY'];
       const data = await (await fetch(`${PROXY}/api/batch?syms=${syms.join(',')}`)).json();
       const find = s => data.find(x => x.sym === s) || {};
+      const mk = (sym,label) => { const q=find(sym); return {sym:label, val:(q.c&&q.c>0)?q.c:null, chg:(typeof q.dp==='number')?q.dp:null}; };
+      // VIXY 是跟踪 VIX 的 ETF（免费档可取），作为市场波动代理；拿不到则 vix 为 null
+      const vixyQuote = find('VIXY');
+      const vixR = await fetch(`${PROXY}/api/vix`).then(r=>r.json()).catch(()=>({}));
       return {
         ...store.market,
         asOf: new Date().toLocaleString('zh-CN'),
-        vix: find('VIX').c || store.market.vix,
+        vix: (typeof vixR.vix==='number') ? vixR.vix : null,   // 真实 VIX（Twelve Data）
+        fearGreed: null, breadthAbove200: null, spx1mReturn: null, erp: null,  // 无可靠免费源
         indices: [
-          {sym:'S&P 500',  val: find('SPY').c*10||store.market.indices[0].val, chg: find('SPY').dp||0},
-          {sym:'Nasdaq',   val: find('QQQ').c*40||store.market.indices[1].val, chg: find('QQQ').dp||0},
-          {sym:'Dow',      val: find('DIA').c*100||store.market.indices[2].val,chg: find('DIA').dp||0},
-          {sym:'Russell2K',val: find('IWM').c*10||store.market.indices[3].val, chg: find('IWM').dp||0},
-          {sym:'VIX',      val: find('VIX').c||store.market.vix,               chg: find('VIX').dp||0},
-          ...store.market.indices.slice(5),
+          mk('SPY','SPY·标普'), mk('QQQ','QQQ·纳指'), mk('DIA','DIA·道指'),
+          mk('IWM','IWM·罗素2K'), mk('VIXY','VIXY·波动'),
         ],
       };
-    } catch(e) { console.warn('getMarket 降级 mock', e); return store.market; }
+    } catch(e) { console.warn('getMarket 失败', e); return { ...store.market, vix:null, fearGreed:null, breadthAbove200:null, indices: store.market.indices.map(i=>({...i,val:null,chg:null})) }; }
   },
   async getPortfolio(){
     if(USE_MOCK) return store.portfolio;
     try {
       const positions = await Promise.all(store.portfolio.positions.map(async h => {
-        const [q, m, t] = await Promise.all([
-          fetch(`${PROXY}/api/quote/${h.sym}`).then(r=>r.json()),
-          fetch(`${PROXY}/api/metrics/${h.sym}`).then(r=>r.json()),
-          fetch(`${PROXY}/api/target/${h.sym}`).then(r=>r.json()),
+        const [q, m, t, prof, rsiR, atrR, earnR] = await Promise.all([
+          fetch(`${PROXY}/api/quote/${h.sym}`).then(r=>r.json()).catch(()=>({})),
+          fetch(`${PROXY}/api/metrics/${h.sym}`).then(r=>r.json()).catch(()=>({})),
+          fetch(`${PROXY}/api/target/${h.sym}`).then(r=>r.json()).catch(()=>({})),
+          fetch(`${PROXY}/api/profile/${h.sym}`).then(r=>r.json()).catch(()=>({})),
+          fetch(`${PROXY}/api/rsi/${h.sym}`).then(r=>r.json()).catch(()=>({})),
+          fetch(`${PROXY}/api/atr/${h.sym}`).then(r=>r.json()).catch(()=>({})),
+          fetch(`${PROXY}/api/earnings/${h.sym}`).then(r=>r.json()).catch(()=>({})),
         ]);
         return {
           ...h,
-          price:  q.c  || h.price,
-          chg:    q.dp || 0,
-          high:   m.metric?.['52WeekHigh'] || h.high || q.c,
-          target: t.targetMean || h.target || q.c,
+          price:    (q.c   && q.c>0)   ? q.c   : null,
+          chg:      (typeof q.dp === 'number') ? q.dp : null,
+          sector:   prof.finnhubIndustry || h.sector || null,
+          high:     m.metric?.['52WeekHigh'] || null,
+          target:   t.targetMean || null,
+          rsi:      (typeof rsiR.rsi === 'number') ? rsiR.rsi : null,
+          atr:      (typeof atrR.atr === 'number') ? atrR.atr : null,
+          earnDays: (typeof earnR.earnDays === 'number') ? earnR.earnDays : null,
         };
       }));
       return { ...store.portfolio, positions };
-    } catch(e) { console.warn('getPortfolio 降级 mock', e); return store.portfolio; }
+    } catch(e) { console.warn('getPortfolio 失败', e); return { ...store.portfolio, positions: store.portfolio.positions.map(h=>({...h,price:null,chg:null,sector:h.sector||null,high:null,target:null,rsi:null,atr:null,earnDays:null})) }; }
   },
   async getEvents(){
-    return mock.events;
-    // 真实：宏观日历(如 Trading Economics / Finnhub /calendar/economic)
-    //       + 个股财报日(Finnhub /calendar/earnings)
+    if(USE_MOCK) return USER_EVENTS;
+    try {
+      const r = await fetch(`${PROXY}/api/events`).then(x=>x.json());
+      if(Array.isArray(r.events) && r.events.length) return r.events;   // 自动获取的真实宏观事件
+    } catch(e) { console.warn('getEvents 自动获取失败', e); }
+    return USER_EVENTS;   // 兜底：手动维护列表（默认空）
   },
   async getAnalyst(){
     if(USE_MOCK) return mock.analyst;
@@ -458,6 +471,16 @@ const DataProvider = {
 };
 
 /* ---------- mock 数据（仅演示，非真实行情） ---------- */
+/* 未来重大事件：手动维护。免费 API 没有可靠的事件/宏观日历，与其用错的假数据，
+   不如你自己填几个关心的真实事件（FOMC、CPI、持仓股财报等，日期公开可查）。
+   留空则界面显示“暂无数据”。格式示例：
+   { date:'06-18', name:'美联储 FOMC 利率决议', impact:5, lean:'bear', note:'点阵图 + 主席讲话' }
+   impact 1~5（影响力）；lean: 'bull'(看涨) / 'bear'(看跌) / 'neutral'(中性) */
+const USER_EVENTS = [
+  // 在这里按上面格式添加你关心的真实事件，例如：
+  // { date:'06-18', name:'美联储 FOMC 利率决议', impact:5, lean:'neutral', note:'' },
+];
+
 const mock = {
   market:{
     asOf:'2025-06-06 16:00 ET',
@@ -543,24 +566,26 @@ function fetchSymbolRef(sym){
    ===================================================================== */
 const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
 const fmt=(n,d=2)=>n.toLocaleString('en-US',{minimumFractionDigits:d,maxFractionDigits:d});
-const pct=n=>(n>=0?'+':'')+n.toFixed(2)+'%';
+const pct=n=>(typeof n!=='number'||isNaN(n))?'—':(n>=0?'+':'')+n.toFixed(2)+'%';
+// 通用“无数据显示 —”辅助：D(值, 格式化函数)
+const D=(v,fn)=>(v==null||(typeof v==='number'&&isNaN(v)))?'—':(fn?fn(v):v);
 
-// 子分1：趋势（大盘宽度 + 动量）
+// 子分1：趋势（大盘宽度 + 动量）。缺数据时取中性 50
 function trendScore(m){
-  const breadth = m.breadthAbove200;                 // 0-100
-  const mom = clamp(50 + m.spx1mReturn*8, 0, 100);   // ±6% 月收益 ≈ ±48 分
+  const breadth = (typeof m.breadthAbove200==='number') ? m.breadthAbove200 : 50;
+  const mom = (typeof m.spx1mReturn==='number') ? clamp(50 + m.spx1mReturn*8, 0, 100) : 50;
   return 0.5*breadth + 0.5*mom;
 }
-// 子分2：估值（Fed 模型 / 股权风险溢价 vs 历史均值）
+// 子分2：估值（Fed 模型 / 股权风险溢价 vs 历史均值）。缺数据时取中性 50
 function valuationScore(m){
-  // ERP 高于历史均值 → 股票相对便宜 → 高分
-  const z = (m.erp - m.erpHistAvg) / 1.5;            // 1.5% 作为一个标准跨度
+  if(typeof m.erp!=='number' || typeof m.erpHistAvg!=='number') return 50;
+  const z = (m.erp - m.erpHistAvg) / 1.5;
   return clamp(50 + z*30, 0, 100);
 }
-// 子分3：情绪（采取“风险管理”立场：VIX 越高、越恐慌 → 越降仓；附带逆向提示）
+// 子分3：情绪（VIX 越高越恐慌 → 越降仓）。缺数据时取中性 50
 function sentimentScore(m){
-  const vixPart = clamp(100 - (m.vix-12)*4, 0, 100); // VIX12→100分, VIX37→0分
-  const fgPart  = m.fearGreed;                        // 贪婪高=分高（顺势）
+  const vixPart = (typeof m.vix==='number') ? clamp(100 - (m.vix-12)*4, 0, 100) : 50;
+  const fgPart  = (typeof m.fearGreed==='number') ? m.fearGreed : 50;
   return 0.6*vixPart + 0.4*fgPart;
 }
 // 子分4：事件风险（未来14天高影响事件越密集 → 越降仓）
@@ -569,9 +594,12 @@ function eventRiskScore(events){
   const load = soon.reduce((s,e)=>s+e.impact,0);     // 影响力累加
   return clamp(100 - load*7, 0, 100);                // 每点影响力扣 7 分
 }
-function daysTo(md){ // 'MM-DD' → 距今天数（原型用固定基准日）
-  const base=new Date('2025-06-06'); const [mm,dd]=md.split('-').map(Number);
-  const t=new Date('2025-'+mm+'-'+dd); return Math.round((t-base)/864e5);
+function daysTo(md){ // 'MM-DD' → 距今天数
+  const now=new Date(); const today=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+  const [mm,dd]=md.split('-').map(Number);
+  let t=new Date(now.getFullYear(),mm-1,dd);
+  if(t-today < -1) t=new Date(now.getFullYear()+1,mm-1,dd); // 已过则算明年同期
+  return Math.round((t-today)/864e5);
 }
 
 // 满仓指数 / 建议仓位
@@ -583,61 +611,77 @@ function computePosition(m,events){
   return { pos, raw, scores:s, weights:w };
 }
 
-// 恐慌指数（0贪婪 ~ 100恐慌）
+// 恐慌指数（0贪婪 ~ 100恐慌）— 简化为仅用 VIX（恐惧贪婪/市场宽度无可靠免费源）
 function computePanic(m){
-  const vixN  = clamp((m.vix-10)/(40-10)*100,0,100);
-  const fgN   = 100 - m.fearGreed;          // 贪婪指数反向 → 恐慌
-  const brN   = 100 - m.breadthAbove200;    // 宽度越差越恐慌
-  const w=CONFIG.panicWeights;
-  const v = vixN*w.vix + fgN*w.fearGreed + brN*w.breadth;
-  return { v:Math.round(v), parts:{vix:Math.round(vixN),fearGreed:Math.round(fgN),breadth:Math.round(brN)} };
+  const hasVix = typeof m.vix==='number' && m.vix>0;
+  const vixN  = hasVix ? clamp((m.vix-10)/(40-10)*100,0,100) : null;
+  return { v: vixN==null?null:Math.round(vixN), parts:{vix: vixN==null?null:Math.round(vixN), fearGreed:null, breadth:null} };
 }
 
-// 个股：止损价、距止损、上行空间、调仓建议
+// 个股：止损价、距止损、上行空间、调仓建议（全部 null 安全，数据缺失返回 null）
 function computeStock(p){
-  const trailStop = p.high*(1-CONFIG.trailStopPct);
-  const atrStop   = p.price - CONFIG.atrStopK*p.atr;
-  const stop      = Math.max(trailStop, atrStop);        // 更近的止损更保守
-  const distStop  = (p.price-stop)/p.price*100;          // 距止损 %
-  const upside    = (p.target-p.price)/p.price*100;      // 上行空间 %
-  let action='持有', tone='hold';
-  if(p.price<=stop){ action='触发止损'; tone='stop'; }
-  else if(upside<=CONFIG.trimUpsidePct || p.rsi>=CONFIG.rsiOverbought){ action='减仓 / 止盈'; tone='trim'; }
-  else if(upside>=CONFIG.addUpsidePct && p.rsi<=CONFIG.rsiOversold){ action='可考虑加仓'; tone='add'; }
-  const earnSoon = p.earnDays<=CONFIG.earningsWarnDays;
+  const hasPrice = typeof p.price === 'number' && p.price>0;
+  const hasHigh  = typeof p.high  === 'number' && p.high>0;
+  const hasAtr   = typeof p.atr   === 'number' && p.atr>0;
+  const hasTgt   = typeof p.target=== 'number' && p.target>0;
+  const hasRsi   = typeof p.rsi   === 'number';
+  // 止损：以近期高点回撤为主；若有 ATR 再取更保守者。两者都没有则无法计算
+  let stop=null;
+  if(hasHigh) stop = p.high*(1-CONFIG.trailStopPct);
+  if(hasPrice && hasAtr){ const atrStop=p.price-CONFIG.atrStopK*p.atr; stop = stop==null?atrStop:Math.max(stop,atrStop); }
+  const distStop = (hasPrice && stop!=null) ? (p.price-stop)/p.price*100 : null;
+  const upside   = (hasPrice && hasTgt)     ? (p.target-p.price)/p.price*100 : null;
+  // 调仓建议：只用拿得到的数据判断
+  let action='—', tone='na';
+  if(hasPrice){
+    if(stop!=null && p.price<=stop){ action='清仓 / 止损'; tone='stop'; }
+    else if(upside!=null && (upside<=CONFIG.trimUpsidePct || (hasRsi && p.rsi>=CONFIG.rsiOverbought))){ action='减仓 / 止盈'; tone='trim'; }
+    else if(upside!=null && upside>=CONFIG.addUpsidePct && (!hasRsi || p.rsi<=CONFIG.rsiOversold)){ action='可加仓'; tone='add'; }
+    else { action='持有'; tone='hold'; }
+  }
+  const earnSoon = (typeof p.earnDays==='number') && p.earnDays<=CONFIG.earningsWarnDays;
   return {stop,distStop,upside,action,tone,earnSoon};
 }
 
-// 组合：市值、占比、集中度、当日/累计盈亏
+// 组合：市值、占比、集中度、当日/累计盈亏（缺现价的持仓不计入金额类汇总）
 function computePortfolio(pf){
-  const rows = pf.positions.map(p=>{ const mv=p.price*p.shares; const cv=p.cost*p.shares;
-    return {...p, mv, costValue:cv, pnl:mv-cv, pnlPct:(p.price-p.cost)/p.cost*100, ...computeStock(p)}; });
-  const equity = rows.reduce((s,r)=>s+r.mv,0);
+  const rows = pf.positions.map(p=>{
+    const hasPrice = typeof p.price==='number' && p.price>0;
+    const mv = hasPrice ? p.price*p.shares : null;
+    const cv = p.cost*p.shares;
+    return {...p, mv, costValue:cv,
+      pnl: hasPrice ? mv-cv : null,
+      pnlPct: hasPrice ? (p.price-p.cost)/p.cost*100 : null,
+      ...computeStock(p)}; });
+  const equity = rows.reduce((s,r)=>s+(r.mv||0),0);
   const total = equity + pf.cash;
-  rows.forEach(r=>r.weight = r.mv/total*100);
-  const dayPnl = rows.reduce((s,r)=>s+ r.mv*(r.chg/100)/(1+r.chg/100),0);
-  const totalPnl = rows.reduce((s,r)=>s+ (r.price-r.cost)*r.shares,0);
-  // 集中度
-  const maxW = Math.max(...rows.map(r=>r.weight));
-  const sector={}; rows.forEach(r=>sector[r.sector]=(sector[r.sector]||0)+r.weight);
-  const maxSector = Object.entries(sector).sort((a,b)=>b[1]-a[1])[0];
-  const hhi = Object.values(sector).reduce((s,w)=>s+(w/100)**2,0); // 0~1，越大越集中
-  return {rows,equity,total,cash:pf.cash,dayPnl,totalPnl,maxW,maxSector,hhi,sector,beta:pf.beta,maxDrawdown:pf.maxDrawdown};
+  rows.forEach(r=> r.weight = (r.mv!=null && total>0) ? r.mv/total*100 : null);
+  const dayPnl = rows.reduce((s,r)=> s + ((r.mv!=null && typeof r.chg==='number') ? r.mv*(r.chg/100)/(1+r.chg/100) : 0),0);
+  const totalPnl = rows.reduce((s,r)=> s + ((typeof r.price==='number'&&r.price>0) ? (r.price-r.cost)*r.shares : 0),0);
+  // 集中度（只用算得出占比的持仓）
+  const valid = rows.filter(r=>r.weight!=null);
+  const maxW = valid.length ? Math.max(...valid.map(r=>r.weight)) : 0;
+  const sector={}; valid.forEach(r=>{ const k=r.sector||'未知'; sector[k]=(sector[k]||0)+r.weight; });
+  const maxSector = Object.entries(sector).sort((a,b)=>b[1]-a[1])[0] || ['—',0];
+  const hhi = Object.values(sector).reduce((s,w)=>s+(w/100)**2,0);
+  return {rows,equity,total,cash:pf.cash,dayPnl,totalPnl,maxW,maxSector,hhi,sector,beta:null,maxDrawdown:null};
 }
 
 // 仓位切换建议（综合满仓指数与当前实际仓位）
 function computeSwitch(pos,port){
-  const current = port.equity/port.total*100;
+  const current = port.total>0 ? port.equity/port.total*100 : null;
+  if(current==null) return {current:null,target:pos.pos,gap:0,txt:'暂无持仓行情数据，无法计算当前实际仓位。',tone:'hold'};
   const gap = pos.pos - current;
   let txt, tone;
-  if(gap<-8){ txt=`当前实际仓位约 ${current.toFixed(0)}%，高于模型建议的 ${pos.pos}%，建议逢高减仓约 ${Math.abs(gap).toFixed(0)} 个百分点，留出现金缓冲。`; tone='trim';}
-  else if(gap>8){ txt=`当前实际仓位约 ${current.toFixed(0)}%，低于模型建议的 ${pos.pos}%，若出现回调可分批加仓约 ${gap.toFixed(0)} 个百分点。`; tone='add';}
+  if(gap<-8){ txt=`当前实际仓位约 ${current.toFixed(0)}%，高于模型建议的 ${pos.pos}%，建议逢高把仓位从 ${current.toFixed(0)}% 调到约 ${pos.pos}%（减约 ${Math.abs(gap).toFixed(0)} 个百分点），留出现金缓冲。`; tone='trim';}
+  else if(gap>8){ txt=`当前实际仓位约 ${current.toFixed(0)}%，低于模型建议的 ${pos.pos}%，若出现回调可分批把仓位从 ${current.toFixed(0)}% 加到约 ${pos.pos}%（加约 ${gap.toFixed(0)} 个百分点）。`; tone='add';}
   else { txt=`当前实际仓位约 ${current.toFixed(0)}%，与模型建议的 ${pos.pos}% 基本一致，维持即可，重点跟踪事件窗口。`; tone='hold';}
-  return {current,gap,txt,tone};
+  return {current,target:pos.pos,gap,txt,tone};
 }
 
 // VIX 分档抄底信号（逆向）：返回命中的最高档位
 function computeVixSignal(m){
+  if(typeof m.vix!=='number'){ return { triggered:false, tier:null, vix:null, tiers:CONFIG.vixTiers, msg:'VIX 指数暂无数据（待接入），抄底信号不可用。' }; }
   let tier=null;
   for(const t of CONFIG.vixTiers){ if(m.vix>=t.min) tier=t; }
   return {
@@ -656,23 +700,23 @@ function buildAlerts(port,events,vixSig){
   if(ipo) a.push({sev:'mid',t:`大型 IPO 临近：${ipo.name}`,d:`${ipo.date} · ${ipo.note}`,tm:'本月'});
   port.rows.forEach(r=>{
     if(r.tone==='stop') a.push({sev:'high',t:`${r.sym} 触及止损位`,d:`现价 ${r.price} 已跌破止损 ${r.stop.toFixed(1)}`,tm:'刚刚'});
-    else if(r.distStop<4) a.push({sev:'high',t:`${r.sym} 逼近止损`,d:`距止损仅 ${r.distStop.toFixed(1)}%`,tm:'刚刚'});
+    else if(r.distStop!=null && r.distStop<4) a.push({sev:'high',t:`${r.sym} 逼近止损`,d:`距止损仅 ${r.distStop.toFixed(1)}%`,tm:'刚刚'});
     if(r.earnSoon) a.push({sev:'mid',t:`${r.sym} 财报临近`,d:`${r.earnDays} 天后发布，注意跳空风险`,tm:'今日'});
-    if(r.tone==='trim') a.push({sev:'mid',t:`${r.sym} 上行空间收窄`,d:`距目标 ${r.upside.toFixed(1)}%，RSI ${r.rsi}`,tm:'今日'});
+    if(r.tone==='trim' && r.upside!=null) a.push({sev:'mid',t:`${r.sym} 上行空间收窄`,d:`距目标 ${r.upside.toFixed(1)}%${r.rsi!=null?`，RSI ${r.rsi}`:''}`,tm:'今日'});
   });
   const order={high:0,mid:1,low:2};
   return a.sort((p,q)=>order[p.sev]-order[q.sev]);
 }
 
-// 行动清单（把告警与个股建议汇总成“要不要动手”）
+// 行动清单（把告警与个股建议汇总成可直接执行的动作）
 function buildActions(port,sw,vixSig){
   const list=[];
-  if(vixSig.triggered) list.push(`【抄底 ${vixSig.tier.label}】VIX ${vixSig.vix}，部署约计划资金的 ${vixSig.tier.deploy}%，分批买入低位龙头`);
-  port.rows.filter(r=>r.tone==='stop').forEach(r=>list.push(`复核 ${r.sym} 止损：现价已破位，决定割肉还是调整止损`));
-  port.rows.filter(r=>r.tone==='trim').forEach(r=>list.push(`评估 ${r.sym} 是否止盈/减仓（上行空间 ${r.upside.toFixed(0)}%）`));
+  if(vixSig.triggered) list.push(`【抄底 ${vixSig.tier.label}】VIX ${vixSig.vix}，分批买入低位龙头，部署约计划资金的 ${vixSig.tier.deploy}%`);
+  port.rows.filter(r=>r.tone==='stop').forEach(r=>list.push(`清仓 / 止损 ${r.sym}：现价 ${r.price} 已跌破止损位 ${r.stop!=null?r.stop.toFixed(1):'—'}`));
+  port.rows.filter(r=>r.tone==='trim').forEach(r=>list.push(`减仓 / 止盈 ${r.sym}${r.weight!=null?`（当前占比 ${r.weight.toFixed(1)}%）`:''}${r.upside!=null?`，距目标仅 ${r.upside.toFixed(0)}%`:''}`));
   port.rows.filter(r=>r.earnSoon).forEach(r=>list.push(`决定 ${r.sym} 是否持有过财报（${r.earnDays} 天后）`));
-  if(Math.abs(sw.gap)>8) list.push(sw.gap>0?`仓位偏低，准备回调加仓计划`:`仓位偏高，列出减仓标的`);
-  port.rows.filter(r=>r.tone==='add').forEach(r=>list.push(`关注 ${r.sym} 加仓机会（上行空间 ${r.upside.toFixed(0)}%，RSI ${r.rsi}）`));
+  port.rows.filter(r=>r.tone==='add').forEach(r=>list.push(`加仓 / 买入 ${r.sym}${r.upside!=null?`（上行空间 ${r.upside.toFixed(0)}%）`:''}`));
+  if(sw.current!=null && Math.abs(sw.gap)>8) list.push(`整体仓位从当前 ${sw.current.toFixed(0)}% 调到模型建议的 ${sw.target}%（${sw.gap>0?'加仓':'减仓'}约 ${Math.abs(sw.gap).toFixed(0)} 个百分点）`);
   return list.length?list:['本周无紧急操作，维持现状并跟踪事件日历'];
 }
 
@@ -684,13 +728,34 @@ async function load(){
   const [market,pfRaw,events,snap,dips]=await Promise.all([
     DataProvider.getMarket(),DataProvider.getPortfolio(),DataProvider.getEvents(),DataProvider.getSnapshot(),DataProvider.getDipLeaders()]);
   const port=computePortfolio(pfRaw);
-  const pos=computePosition(market,events);
-  const panic=computePanic(market);
-  const sw=computeSwitch(pos,port);
+  let pos=computePosition(market,events);
+  let panic=computePanic(market);
+  let sw=computeSwitch(pos,port);
   const vixSig=computeVixSignal(market);
+  let aiNote=null;
+  // —— AI 综合分析（可选，失败自动回退到上面的规则引擎结果）——
+  if(USE_AI && !USE_MOCK){
+    try{
+      const payload={
+        asOf: market.asOf, vix: market.vix,
+        events: events.map(e=>({date:e.date,name:e.name,impact:e.impact})),
+        cash: port.cash, total: port.total,
+        positions: port.rows.map(r=>({sym:r.sym,name:r.name,sector:r.sector,price:r.price,chgPct:r.chg,
+          weightPct:r.weight,pnlPct:r.pnlPct,target:r.target,upsidePct:r.upside,rsi:r.rsi,distStopPct:r.distStop,earnDays:r.earnDays})),
+        concentration:{maxSinglePct:port.maxW,topSector:port.maxSector[0],topSectorPct:port.maxSector[1]},
+      };
+      const ai=await fetch(`${PROXY}/api/analyze`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(r=>r.json());
+      if(ai && typeof ai.position==='number'){
+        pos={...pos, pos:Math.round(ai.position), fromAI:true};
+        sw=computeSwitch(pos,port);
+        if(typeof ai.panic==='number') panic={...panic, v:Math.round(ai.panic)};
+        aiNote={stance:ai.stance||'', commentary:ai.commentary||'', actions:Array.isArray(ai.actions)?ai.actions:[]};
+      }
+    }catch(e){ console.warn('AI 分析失败，使用规则引擎结果', e); }
+  }
   const alerts=buildAlerts(port,events,vixSig);
-  const actions=buildActions(port,sw,vixSig);
-  state={market,port,pos,panic,sw,vixSig,alerts,actions,events,snap,pfRaw,dips};
+  const actions=(aiNote&&aiNote.actions.length?aiNote.actions:[]).concat(buildActions(port,sw,vixSig));
+  state={market,port,pos,panic,sw,vixSig,alerts,actions,events,snap,pfRaw,dips,aiNote};
   render();
 }
 
@@ -700,18 +765,21 @@ function render(){
 
   // ticker
   document.getElementById('ticker').innerHTML=market.indices.map(i=>{
-    const c=i.chg>=0?'up':'down', s=(i.chg>=0?'▲':'▼');
-    return `<div class="tk"><span class="l">${i.sym}</span><span class="v mono">${i.val.toLocaleString()}${i.unit||''}</span><span class="c mono ${c}">${s} ${Math.abs(i.chg).toFixed(2)}%</span></div>`;
+    if(i.val==null) return `<div class="tk"><span class="l">${i.sym}</span><span class="v mono">—</span></div>`;
+    const ch=(typeof i.chg==='number')?i.chg:0, c=ch>=0?'up':'down', s=(ch>=0?'▲':'▼');
+    return `<div class="tk"><span class="l">${i.sym}</span><span class="v mono">${i.val.toLocaleString()}${i.unit||''}</span><span class="c mono ${c}">${s} ${Math.abs(ch).toFixed(2)}%</span></div>`;
   }).join('');
 
   // gauge
-  renderGauge(pos.pos, sw.current);
+  const curW = sw.current==null?0:sw.current;
+  const curTxt = sw.current==null?'—':sw.current.toFixed(0);
+  renderGauge(pos.pos, curW);
   document.getElementById('posNum').textContent=pos.pos+'%';
   const sc=pos.scores, w=pos.weights;
   const bdData=[['趋势',sc.trend,w.trend,'var(--up)'],['估值',sc.valuation,w.valuation,'var(--info)'],
     ['情绪',sc.sentiment,w.sentiment,'var(--warn)'],['事件风险',sc.eventRisk,w.eventRisk,'var(--gold)']];
   document.getElementById('breakdown').innerHTML=
-    `<div class="bd-row" style="margin-bottom:3px"><span class="nm" style="color:var(--tx)">当前实际仓位</span><span class="bar"><i style="width:${sw.current}%;background:var(--tx2)"></i></span><span class="sc">${sw.current.toFixed(0)}</span><span class="wt">实际</span></div>
+    `<div class="bd-row" style="margin-bottom:3px"><span class="nm" style="color:var(--tx)">当前实际仓位</span><span class="bar"><i style="width:${curW}%;background:var(--tx2)"></i></span><span class="sc">${curTxt}</span><span class="wt">实际</span></div>
      <div style="height:1px;background:var(--line);margin:4px 0 9px"></div>`+
     bdData.map(([n,s,wt,col])=>
     `<div class="bd-row"><span class="nm">${n}</span><span class="bar"><i style="width:${s}%;background:${col}"></i></span><span class="sc">${s.toFixed(0)}</span><span class="wt">${(wt*100).toFixed(0)}%</span></div>`).join('');
@@ -720,8 +788,15 @@ function render(){
   const vbg = vixSig.triggered ? (vixSig.tier.tone==='mild'?'var(--warn-bg)':'var(--up-bg)') : '';
   const vixBanner = vixSig.triggered
     ? `<div class="verdict" style="border-color:${vc};background:${vbg};color:${vc};margin-bottom:8px;font-weight:500">★ VIX 抄底信号 · ${vixSig.tier.label}（部署约 ${vixSig.tier.deploy}%）：${vixSig.tier.txt}</div>` : '';
-  document.getElementById('verdict').innerHTML=vixBanner+
-    `当前实际仓位 <b class="mono">${sw.current.toFixed(0)}%</b> → 模型建议 <b>${pos.pos}%</b>（综合得分 <b class="mono">${pos.raw.toFixed(1)}</b>/100）。${stance}。`;
+  const aiBlock = state.aiNote
+    ? `<div style="margin-bottom:8px"><b style="color:var(--gold)">🤖 AI 综合分析</b>${state.aiNote.stance?` · ${state.aiNote.stance}`:''}<br><span style="color:var(--tx2);font-size:12.5px;line-height:1.6">${state.aiNote.commentary}</span></div>`
+    : '';
+  const posSrc = pos.fromAI ? 'AI 综合判断' : '规则模型';
+  const ruleNote = pos.fromAI
+    ? '<small class="muted">建议仓位由 AI 基于 VIX、事件、各持仓真实数据综合给出，仅供参考、非投资建议。</small>'
+    : '<small class="muted">注：建议仓位的趋势/估值/事件分项目前为简化估算，待接入对应数据后更准确。</small>';
+  document.getElementById('verdict').innerHTML=vixBanner+aiBlock+
+    `当前实际仓位 <b class="mono">${curTxt}%</b> → ${posSrc}建议 <b>${pos.pos}%</b>。${stance}。<br>${ruleNote}`;
 
   // alerts
   const sevCol={high:'var(--down)',mid:'var(--warn)',low:'var(--info)'};
@@ -730,73 +805,81 @@ function render(){
     `<div class="alert"><div class="sev" style="background:${sevCol[a.sev]}"></div><div class="body"><div class="t">${a.t}</div><div class="d">${a.d}</div></div><div class="tm">${a.tm}</div></div>`).join('');
 
   // since last view
-  const diff=port.total-pfRaw.prevValue, diffP=diff/pfRaw.prevValue*100;
-  const top=[...port.rows].sort((a,b)=>(b.price-b.cost)*b.shares-(a.price-a.cost)*a.shares)[0];
-  document.getElementById('lastSeen').textContent='（'+pfRaw.prevAsOf+'起）';
+  const hasPrev = typeof pfRaw.prevValue==='number' && pfRaw.prevValue>0;
+  const diff= hasPrev ? port.total-pfRaw.prevValue : null, diffP= hasPrev ? diff/pfRaw.prevValue*100 : null;
+  const valued=[...port.rows].filter(r=>typeof r.price==='number'&&r.price>0);
+  const top= valued.sort((a,b)=>(b.price-b.cost)*b.shares-(a.price-a.cost)*a.shares)[0];
+  document.getElementById('lastSeen').textContent= pfRaw.prevAsOf?'（'+pfRaw.prevAsOf+'起）':'';
   document.getElementById('snap').innerHTML=`
-    <div class="blk"><div class="k">总资产变动</div><div class="v ${diff>=0?'up':'down'} mono">${diff>=0?'+':''}$${Math.abs(diff).toLocaleString()}</div><div class="k ${diff>=0?'up':'down'}">${pct(diffP)}</div></div>
+    <div class="blk"><div class="k">总资产变动</div><div class="v ${diff>=0?'up':'down'} mono">${diff==null?'—':(diff>=0?'+':'')+'$'+Math.abs(diff).toLocaleString()}</div><div class="k ${diff>=0?'up':'down'}">${pct(diffP)}</div></div>
     <div class="blk"><div class="k">当日盈亏</div><div class="v ${port.dayPnl>=0?'up':'down'} mono">${port.dayPnl>=0?'+':''}$${Math.abs(port.dayPnl).toLocaleString(undefined,{maximumFractionDigits:0})}</div></div>
-    <div class="blk"><div class="k">贡献最大</div><div class="v mono">${top.sym}</div><div class="k ${(top.price-top.cost)>=0?'up':'down'}">${pct((top.price-top.cost)/top.cost*100)}</div></div>`;
+    <div class="blk"><div class="k">贡献最大</div><div class="v mono">${top?top.sym:'—'}</div><div class="k ${top&&(top.price-top.cost)>=0?'up':'down'}">${top?pct((top.price-top.cost)/top.cost*100):'—'}</div></div>`;
 
   // actions
   document.getElementById('actions').innerHTML=actions.map((x,i)=>`<div class="act"><span class="ix">${(i+1).toString().padStart(2,'0')}</span><span class="x">${x}</span></div>`).join('');
 
   // panic
-  document.getElementById('panicNum').textContent=panic.v;
-  document.getElementById('panicNum').className='mono '+(panic.v>=66?'down':panic.v>=40?'warn':'up');
-  document.getElementById('panicPin').style.left=panic.v+'%';
-  document.getElementById('panicLab').textContent=panic.v>=66?'恐慌':panic.v>=40?'中性':'贪婪';
+  const pv = panic.v;
+  document.getElementById('panicNum').textContent = pv==null?'—':pv;
+  document.getElementById('panicNum').className='mono '+(pv==null?'':pv>=66?'down':pv>=40?'warn':'up');
+  document.getElementById('panicPin').style.left=(pv==null?50:pv)+'%';
+  document.getElementById('panicLab').textContent= pv==null?'—':pv>=66?'恐慌':pv>=40?'中性':'贪婪';
   document.getElementById('panicParts').innerHTML=
-    `VIX 分项 <b class="mono">${panic.parts.vix}</b> · 恐惧贪婪 <b class="mono">${panic.parts.fearGreed}</b> · 市场宽度 <b class="mono">${panic.parts.breadth}</b>`;
+    `VIX 分项 <b class="mono">${D(panic.parts.vix)}</b> · 恐惧贪婪 <b class="mono">${D(panic.parts.fearGreed)}</b> · 市场宽度 <b class="mono">${D(panic.parts.breadth)}</b><br><small class="muted">当前仅基于 VIX 计算；恐惧贪婪/市场宽度无可靠免费数据源，显示 —。</small>`;
 
   // events
   const leanMap={bull:['看涨','var(--up-bg)','var(--up)'],bear:['看跌','var(--down-bg)','var(--down)'],neutral:['中性','var(--card2)','var(--tx2)']};
-  document.getElementById('events').innerHTML=events.map(e=>{
-    const [lt,lbg,lc]=leanMap[e.lean];
-    const bars=[1,2,3,4,5].map(i=>`<i class="${i<=e.impact?'on':''}"></i>`).join('');
-    return `<div class="ev"><span class="dt">${e.date}</span><span class="nm">${e.name}${e.note?`<small>${e.note}</small>`:''}</span><span class="imp">${bars}</span><span class="lean" style="background:${lbg};color:${lc}">${lt}</span></div>`;
-  }).join('');
+  document.getElementById('events').innerHTML = (events && events.length)
+    ? events.map(e=>{
+        const [lt,lbg,lc]=leanMap[e.lean]||leanMap.neutral;
+        const bars=[1,2,3,4,5].map(i=>`<i class="${i<=e.impact?'on':''}"></i>`).join('');
+        return `<div class="ev"><span class="dt">${e.date}</span><span class="nm">${e.name}${e.note?`<small>${e.note}</small>`:''}</span><span class="imp">${bars}</span><span class="lean" style="background:${lbg};color:${lc}">${lt}</span></div>`;
+      }).join('')
+    : `<div class="muted" style="padding:18px 4px;font-size:13px;line-height:1.7">暂无数据 · 可手动维护<br><small>免费 API 无可靠事件日历。在文件顶部 <b class="mono">USER_EVENTS</b> 里按示例添加你关心的真实事件（FOMC、CPI、持仓股财报等）即可显示。</small></div>`;
 
   // switch
   const stoneCol={trim:'var(--down)',add:'var(--up)',hold:'var(--tx2)'};
   document.getElementById('switchAdvice').innerHTML=
-    `<div style="font-size:32px;font-family:var(--disp);font-weight:700;margin-bottom:4px" class="mono">${sw.current.toFixed(0)}<span style="font-size:15px;color:var(--tx3)"> / ${pos.pos}%</span></div>
+    `<div style="font-size:32px;font-family:var(--disp);font-weight:700;margin-bottom:4px" class="mono">${curTxt}<span style="font-size:15px;color:var(--tx3)"> / ${pos.pos}%</span></div>
      <div class="muted" style="font-size:11px;margin-bottom:12px">当前实际 / 模型建议</div>
      <div class="verdict" style="border-color:${stoneCol[sw.tone]}33;font-size:13px;line-height:1.6">${sw.txt}</div>`;
 
   // holdings
-  const toneCol={stop:['触发止损','var(--down-bg)','var(--down)'],trim:['减仓/止盈','var(--warn-bg)','var(--warn)'],
-    add:['可考虑加仓','var(--up-bg)','var(--up)'],hold:['持有','var(--card2)','var(--tx2)']};
+  const toneCol={stop:['清仓/止损','var(--down-bg)','var(--down)'],trim:['减仓/止盈','var(--warn-bg)','var(--warn)'],
+    add:['可加仓','var(--up-bg)','var(--up)'],hold:['持有','var(--card2)','var(--tx2)'],na:['数据不足','var(--card2)','var(--tx3)']};
+  const usd0=n=>'$'+Math.round(n).toLocaleString();
   document.getElementById('holdings').innerHTML=port.rows.map(r=>{
-    const [at,abg,ac]=toneCol[r.tone];
-    const stopPctW=clamp(r.distStop/20*100,3,100), stopCol=r.distStop<6?'var(--down)':r.distStop<12?'var(--warn)':'var(--up)';
+    const [at,abg,ac]=toneCol[r.tone]||toneCol.na;
+    const ds=r.distStop;
+    const stopPctW=ds==null?0:clamp(ds/20*100,3,100), stopCol=ds==null?'var(--tx3)':ds<6?'var(--down)':ds<12?'var(--warn)':'var(--up)';
     return `<tr>
-      <td><span class="sym">${r.sym}<small>${r.name} · ${r.sector}</small></span></td>
+      <td><span class="sym">${r.sym}<small>${r.name} · ${r.sector||'—'}</small></span></td>
       <td class="mono">${r.shares}</td>
-      <td class="mono">$${r.price} <span class="${r.chg>=0?'up':'down'}" style="font-size:11px">${pct(r.chg)}</span></td>
-      <td class="mono">$${r.mv.toLocaleString(undefined,{maximumFractionDigits:0})}</td>
-      <td class="mono">${r.weight.toFixed(1)}%</td>
-      <td class="mono ${r.pnl>=0?'up':'down'}">${r.pnl>=0?'+':''}$${Math.abs(r.pnl).toLocaleString(undefined,{maximumFractionDigits:0})}<br><small>${r.pnlPct>=0?'+':''}${r.pnlPct.toFixed(1)}%</small></td>
-      <td class="mono">$${r.target} <span class="${r.upside>=0?'up':'down'}">(${r.upside>=0?'+':''}${r.upside.toFixed(0)}%)</span></td>
-      <td class="mono ${r.rsi>=70?'down':r.rsi<=42?'up':''}">${r.rsi}</td>
-      <td class="mono">${r.distStop.toFixed(1)}%<span class="stopbar"><i style="width:${stopPctW}%;background:${stopCol}"></i></span></td>
-      <td>${r.earnSoon?`<span class="warn mono">${r.earnDays}天</span>`:`<span class="muted mono">${r.earnDays}天</span>`}</td>
+      <td class="mono">${r.price==null?'—':'$'+r.price} ${r.chg==null?'':`<span class="${r.chg>=0?'up':'down'}" style="font-size:11px">${pct(r.chg)}</span>`}</td>
+      <td class="mono">${D(r.mv,usd0)}</td>
+      <td class="mono">${D(r.weight,v=>v.toFixed(1)+'%')}</td>
+      <td class="mono ${r.pnl>=0?'up':'down'}">${r.pnl==null?'—':`${r.pnl>=0?'+':'-'}${usd0(Math.abs(r.pnl))}<br><small>${r.pnlPct>=0?'+':''}${r.pnlPct.toFixed(1)}%</small>`}</td>
+      <td class="mono">${r.target==null?'—':'$'+r.target} ${r.upside==null?'':`<span class="${r.upside>=0?'up':'down'}">(${r.upside>=0?'+':''}${r.upside.toFixed(0)}%)</span>`}</td>
+      <td class="mono ${r.rsi>=70?'down':r.rsi<=42?'up':''}">${D(r.rsi)}</td>
+      <td class="mono">${ds==null?'—':ds.toFixed(1)+'%'}<span class="stopbar"><i style="width:${stopPctW}%;background:${stopCol}"></i></span></td>
+      <td>${r.earnDays==null?'<span class="muted mono">—</span>':(r.earnSoon?`<span class="warn mono">${r.earnDays}天</span>`:`<span class="muted mono">${r.earnDays}天</span>`)}</td>
       <td><span class="tag-act" style="background:${abg};color:${ac}">${at}</span></td>
     </tr>`;
   }).join('')+`<tr style="border-top:2px solid var(--line2)">
       <td><b>合计</b></td><td></td><td></td>
-      <td class="mono"><b>$${port.equity.toLocaleString(undefined,{maximumFractionDigits:0})}</b></td>
-      <td class="mono"><b>${(port.equity/port.total*100).toFixed(0)}%</b></td>
-      <td class="mono ${port.totalPnl>=0?'up':'down'}"><b>${port.totalPnl>=0?'+':''}$${Math.abs(port.totalPnl).toLocaleString(undefined,{maximumFractionDigits:0})}</b></td>
-      <td colspan="5" class="muted" style="font-size:11.5px">持仓市值 + 现金 $${port.cash.toLocaleString()} = 总资产 $${port.total.toLocaleString(undefined,{maximumFractionDigits:0})}</td>
+      <td class="mono"><b>${usd0(port.equity)}</b></td>
+      <td class="mono"><b>${port.total>0?(port.equity/port.total*100).toFixed(0)+'%':'—'}</b></td>
+      <td class="mono ${port.totalPnl>=0?'up':'down'}"><b>${port.totalPnl>=0?'+':''}${usd0(Math.abs(port.totalPnl))}</b></td>
+      <td colspan="5" class="muted" style="font-size:11.5px">持仓市值 + 现金 $${port.cash.toLocaleString()} = 总资产 ${usd0(port.total)}</td>
     </tr>`;
 
   // risk kpi
+  const cashPct = port.total>0 ? (port.cash/port.total*100).toFixed(0)+'%' : '—';
   document.getElementById('riskKpi').innerHTML=`
-    <div class="c"><div class="k">组合总资产</div><div class="v mono">$${port.total.toLocaleString(undefined,{maximumFractionDigits:0})}</div><div class="s">现金 $${port.cash.toLocaleString()}（${(port.cash/port.total*100).toFixed(0)}%）</div></div>
-    <div class="c"><div class="k">累计盈亏</div><div class="v mono ${port.totalPnl>=0?'up':'down'}">${port.totalPnl>=0?'+':''}$${Math.abs(port.totalPnl).toLocaleString(undefined,{maximumFractionDigits:0})}</div></div>
-    <div class="c"><div class="k">组合 Beta</div><div class="v mono">${port.beta}</div><div class="s">${port.beta>1.1?'波动高于大盘':'与大盘相近'}</div></div>
-    <div class="c"><div class="k">历史最大回撤</div><div class="v mono down">${port.maxDrawdown}%</div></div>`;
+    <div class="c"><div class="k">组合总资产</div><div class="v mono">${usd0(port.total)}</div><div class="s">现金 $${port.cash.toLocaleString()}（${cashPct}）</div></div>
+    <div class="c"><div class="k">累计盈亏</div><div class="v mono ${port.totalPnl>=0?'up':'down'}">${port.totalPnl>=0?'+':''}${usd0(Math.abs(port.totalPnl))}</div></div>
+    <div class="c"><div class="k">组合 Beta</div><div class="v mono">${D(port.beta)}</div><div class="s">需接入个股 Beta 数据</div></div>
+    <div class="c"><div class="k">历史最大回撤</div><div class="v mono down">${D(port.maxDrawdown,v=>v+'%')}</div></div>`;
   const flags=[];
   if(port.maxW>CONFIG.maxSingleWeight) flags.push(['down',`单票集中度偏高：最大持仓占 ${port.maxW.toFixed(0)}%（阈值 ${CONFIG.maxSingleWeight}%）`]);
   if(port.maxSector[1]>CONFIG.maxSectorWeight) flags.push(['down',`行业过度集中：${port.maxSector[0]} 占 ${port.maxSector[1].toFixed(0)}%（阈值 ${CONFIG.maxSectorWeight}%）`]);
@@ -833,7 +916,7 @@ function render(){
   }).join('');
 
   document.getElementById('disclaimer').innerHTML=
-    '⚠ 风险提示：本看板为功能原型，当前显示均为<b>模拟数据</b>。其中的满仓指数、建议仓位、恐慌指数、止损位与调仓建议，均由上方公开的启发式公式（参数见 CONFIG）自动计算得出，属于<b>工具化的量化参考，不构成投资建议</b>。任何买卖、仓位与止损决策请结合自身风险承受能力，或咨询持牌投资顾问后自行判断。';
+    '⚠ 风险提示：本看板的<b>现价、涨跌、行业、52周高、分析师目标价</b>为实时数据；<b>RSI、ATR、财报日期、未来事件、恐惧贪婪、市场宽度、Beta、最大回撤</b>暂未接入数据源，统一显示 <b>—</b>（接入方式见使用说明）。下方"待买入清单""抄底候选"为<b>人工维护的示例清单</b>。其中满仓指数、恐慌指数、止损位与调仓建议均由上方公开的启发式公式（参数见 CONFIG）自动计算，属于<b>工具化的量化参考，不构成投资建议</b>；数据不全时相关结论会显示"—"或"数据不足"。任何买卖、仓位与止损决策请结合自身风险承受能力，或咨询持牌投资顾问后自行判断。';
 }
 
 function renderGauge(val, current){
