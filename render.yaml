@@ -3,7 +3,17 @@ services:
     name: stock-proxy
     runtime: node
     buildCommand: npm install
-    startCommand: node proxy.js
+    startCommand: npm start
     envVars:
-      - key: FINNHUB_KEY
+      - key: POLYGON_KEY
+        sync: false
+      - key: FMP_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: CLAUDE_MODEL
+        value: claude-3-5-sonnet-latest
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_REPO
         sync: false
