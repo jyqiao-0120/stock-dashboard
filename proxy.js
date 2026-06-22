@@ -380,6 +380,57 @@ async function fmpIndicator(sym, type) {
   throw new Error(lastErr || 'indicator unavailable');
 }
 
+function sortedDailyBars(value) {
+  return rowsFrom(value)
+    .map(row => ({
+      date: String(firstDefined(row.date, row.label, row.time) || '').slice(0, 10),
+      high: num(firstDefined(row.high, row.h)),
+      low: num(firstDefined(row.low, row.l)),
+      close: num(firstDefined(row.close, row.c, row.adjClose, row.adj_close)),
+    }))
+    .filter(row => row.date && row.high !== null && row.low !== null && row.close !== null)
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function calculateAtrFromBars(bars, period = 14) {
+  if (!Array.isArray(bars) || bars.length < period + 1) return null;
+  const recent = bars.slice(-(period + 1));
+  const trs = [];
+  for (let i = 1; i < recent.length; i++) {
+    const cur = recent[i];
+    const prev = recent[i - 1];
+    const tr = Math.max(cur.high - cur.low, Math.abs(cur.high - prev.close), Math.abs(cur.low - prev.close));
+    if (Number.isFinite(tr)) trs.push(tr);
+  }
+  if (trs.length < period) return null;
+  return round(trs.slice(-period).reduce((s, v) => s + v, 0) / period, 2);
+}
+
+async function fmpHistoricalAtr(sym, period = 14) {
+  if (!FMP_KEY) throw new Error('missing FMP_KEY');
+  const s = cleanSym(sym);
+  const to = new Date().toISOString().slice(0, 10);
+  const from = new Date(Date.now() - 90 * 864e5).toISOString().slice(0, 10);
+  const urls = [
+    FMP_STABLE + '/historical-price-eod/full?symbol=' + encodeURIComponent(s) + '&from=' + from + '&to=' + to + '&apikey=' + encodeURIComponent(FMP_KEY),
+    FMP_STABLE + '/historical-price-eod/light?symbol=' + encodeURIComponent(s) + '&from=' + from + '&to=' + to + '&apikey=' + encodeURIComponent(FMP_KEY),
+    FMP_STABLE + '/historical-chart/1day?symbol=' + encodeURIComponent(s) + '&from=' + from + '&to=' + to + '&apikey=' + encodeURIComponent(FMP_KEY),
+    FMP_V3 + '/historical-price-full/' + encodeURIComponent(s) + '?from=' + from + '&to=' + to + '&apikey=' + encodeURIComponent(FMP_KEY),
+  ];
+  let lastErr = '';
+  for (const url of urls) {
+    try {
+      const bars = sortedDailyBars(await getJSON(url));
+      const atr = calculateAtrFromBars(bars, period);
+      if (atr !== null) return { atr, source: 'FMP Historical EOD Calculated ATR', bars: bars.length };
+      lastErr = 'not enough daily bars';
+    } catch (e) {
+      lastErr = providerError(e);
+    }
+  }
+  throw new Error(lastErr || 'historical ATR unavailable');
+}
+
 function earningsDateKey(row) {
   const raw = firstDefined(row && row.date, row && row.reportDate, row && row.earningsDate, row && row.fiscalDateEnding);
   const m = String(raw || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -684,8 +735,19 @@ app.get('/api/rsi/:sym', async (req, res) => {
 });
 
 app.get('/api/atr/:sym', async (req, res) => {
-  try { res.json({ atr: await fmpIndicator(req.params.sym, 'atr'), source: 'FMP ATR' }); }
-  catch (e) { res.json({ atr: null, source: 'FMP ATR', error: providerError(e) }); }
+  try { return res.json({ atr: await fmpIndicator(req.params.sym, 'atr'), source: 'FMP ATR' }); }
+  catch (directErr) {
+    try {
+      const calc = await fmpHistoricalAtr(req.params.sym, 14);
+      return res.json({ ...calc, warning: 'FMP ATR endpoint failed: ' + providerError(directErr) });
+    } catch (histErr) {
+      return res.json({
+        atr: null,
+        source: 'FMP ATR',
+        error: providerError(directErr) + ' | Historical fallback: ' + providerError(histErr),
+      });
+    }
+  }
 });
 
 app.get('/api/vix', async (req, res) => {
