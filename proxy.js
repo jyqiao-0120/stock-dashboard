@@ -611,10 +611,32 @@ app.post('/api/analyze', async (req, res) => {
 function ghHeaders(extra = {}) {
   const h = Object.assign({
     Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
     'User-Agent': 'stock-dashboard',
   }, extra);
   if (GTOKEN) h.Authorization = 'Bearer ' + GTOKEN;
   return h;
+}
+
+const GITHUB_WRITE_HELP = 'Render 环境变量 GITHUB_TOKEN 当前没有写入仓库内容的权限。请在 GitHub 生成 Fine-grained personal access token，Repository access 选择 jyqiao-0120/stock-dashboard，Repository permissions -> Contents 设置 Read and write，然后替换 Render 的 GITHUB_TOKEN 并重新部署。';
+
+function githubWriteHelp(message) {
+  const text = String(message || '');
+  if (/Resource not accessible by personal access token|permission|access|forbidden|not accessible/i.test(text)) return GITHUB_WRITE_HELP;
+  return '';
+}
+
+function githubHoldingsError(status, message, code) {
+  const msg = message || 'GitHub update failed';
+  const help = githubWriteHelp(msg);
+  return {
+    error: msg,
+    code: help ? 'GITHUB_TOKEN_NO_WRITE' : (code || 'GITHUB_UPDATE_FAILED'),
+    help,
+    repo: REPO,
+    file: HFILE,
+    status,
+  };
 }
 
 function validateHoldings(data) {
@@ -659,7 +681,7 @@ app.get('/api/holdings', async (req, res) => {
 
 app.post('/api/holdings', async (req, res) => {
   try {
-    if (!REPO || !GTOKEN) return res.status(503).json({ error: 'missing GITHUB_REPO or GITHUB_TOKEN' });
+    if (!REPO || !GTOKEN) return res.status(503).json({ error: 'missing GITHUB_REPO or GITHUB_TOKEN', code: 'GITHUB_TOKEN_MISSING', help: GITHUB_WRITE_HELP, repo: REPO, file: HFILE });
     const data = validateHoldings(req.body || {});
     const cur = await getJSON(GH + '/repos/' + REPO + '/contents/' + HFILE, { headers: ghHeaders() });
     const r = await fetch(GH + '/repos/' + REPO + '/contents/' + HFILE, {
@@ -672,10 +694,12 @@ app.post('/api/holdings', async (req, res) => {
       }),
     });
     const j = await r.json();
-    if (!r.ok || !j.commit) return res.status(r.status || 400).json({ error: j.message || 'GitHub update failed' });
+    if (!r.ok || !j.commit) return res.status(r.status || 400).json(githubHoldingsError(r.status, j.message || 'GitHub update failed'));
     res.json({ ok: true, sha: j.content && j.content.sha, updatedAt: data.updatedAt });
   } catch (e) {
-    res.status(500).json({ error: providerError(e) });
+    const msg = providerError(e);
+    const status = e && e.status ? e.status : 500;
+    res.status(status).json(githubHoldingsError(status, msg));
   }
 });
 

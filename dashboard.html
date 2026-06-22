@@ -548,7 +548,8 @@ async function fetchJSON(url, fallback=null, timeoutMs=FETCH_TIMEOUT_MS, options
     const json=await res.json().catch(()=>fallback);
     if(!res.ok){
       const err=(json&&json.error)||res.statusText||('HTTP '+res.status);
-      if(fallback && typeof fallback==='object' && !Array.isArray(fallback)) return {...fallback,ok:false,error:err};
+      const detail=(json && typeof json==='object' && !Array.isArray(json)) ? json : {};
+      if(fallback && typeof fallback==='object' && !Array.isArray(fallback)) return {...fallback,...detail,ok:false,error:err};
       return fallback;
     }
     return json;
@@ -568,6 +569,10 @@ function normalizeWatch(w){
 }
 async function loadRemotePortfolio(){
   if(USE_MOCK) return store.portfolio;
+  if(store.portfolio && store.portfolio._localUnsynced){
+    console.warn('持仓存在本地未同步版本，优先使用本地缓存', store.portfolio._syncError || '');
+    return store.portfolio;
+  }
   const h=await fetchJSON(PROXY + '/api/holdings', null, 10000);
   if(h && Array.isArray(h.positions)){
     const remote={
@@ -587,11 +592,12 @@ async function loadRemotePortfolio(){
   return store.portfolio;
 }
 function statusLine(market){
+  const syncWarn=(store.portfolio && store.portfolio._localUnsynced) ? ' · 持仓待同步' : '';
   if(USE_MOCK) return '模拟数据';
   const missing=market?.dataStatus?.missing||[];
-  if(missing.length) return '实时数据 · 待配置 ' + missing.join('/');
+  if(missing.length) return '实时数据 · 待配置 ' + missing.join('/') + syncWarn;
   const w=market?.dataWarnings||[];
-  return w.length ? '实时数据 · ' + w.slice(0,2).join(' / ') : '实时数据';
+  return (w.length ? '实时数据 · ' + w.slice(0,2).join(' / ') : '实时数据') + syncWarn;
 }
 
 /* 可编辑数据 store：手动维护的持仓 / 市场参数存这里。
@@ -1339,10 +1345,25 @@ async function saveManage(){
     btn.disabled=true; btn.textContent='保存中...';
     try{
       const d=await fetchJSON(PROXY + '/api/holdings',{ok:false,error:'保存失败'},15000,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(syncData)});
-      if(!d.ok) throw new Error(d.error||'保存失败');
+      if(!d.ok){
+        const err=new Error(d.error||'保存失败');
+        err.detail=d;
+        throw err;
+      }
+      delete store.portfolio._localUnsynced;
+      delete store.portfolio._syncError;
+      delete store.portfolio._syncHelp;
+      if(d.sha) store.portfolio._sha=d.sha;
+      store.portfolio.source='GitHub Contents API';
+      saveStore('portfolio',store.portfolio);
     }catch(e){
-      alert('保存到 GitHub 失败：'+e.message);
+      const detail=e.detail||{};
+      const help=detail.help || '请在 Render 的 GITHUB_TOKEN 中确认已授予 jyqiao-0120/stock-dashboard 仓库 Contents: Read and write 权限。';
+      store.portfolio={...store.portfolio,_localUnsynced:true,_syncError:e.message,_syncHelp:help};
+      saveStore('portfolio',store.portfolio);
+      alert('已先保存到本机浏览器，但没有同步到 GitHub。\n原因：'+e.message+'\n\n'+help+'\n\n修好 token 后，在本页面再次点击保存即可同步。');
       btn.disabled=false; btn.textContent=oldTxt;
+      closeManage(); await load();
       return;
     }
     btn.disabled=false; btn.textContent=oldTxt;
