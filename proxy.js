@@ -67,6 +67,17 @@ function stampFromSec(sec) {
   return new Date(n * 1000).toISOString();
 }
 
+function stampFromValue(v) {
+  const n = num(v);
+  if (n) {
+    const d = n > 1e12 ? new Date(n) : new Date(n * 1000);
+    return Number.isFinite(d.getTime()) ? d.toISOString() : null;
+  }
+  if (!v) return null;
+  const d = new Date(v);
+  return Number.isFinite(d.getTime()) ? d.toISOString() : null;
+}
+
 function staleFrom(asOf, maxHours = 96) {
   if (!asOf) return true;
   const ageHours = (Date.now() - new Date(asOf).getTime()) / 36e5;
@@ -120,6 +131,27 @@ function okQuote(sym, data) {
   }, data || {});
 }
 
+function firstDefined() {
+  for (const v of arguments) {
+    if (v !== undefined && v !== null && v !== '') return v;
+  }
+  return null;
+}
+
+function rowsFrom(value) {
+  if (Array.isArray(value)) return value;
+  if (value && Array.isArray(value.data)) return value.data;
+  if (value && Array.isArray(value.results)) return value.results;
+  if (value && Array.isArray(value.historical)) return value.historical;
+  return value ? [value] : [];
+}
+
+function firstMatchingRow(value, sym) {
+  const s = cleanSym(sym);
+  const rows = rowsFrom(value).filter(Boolean);
+  return rows.find(r => cleanSym(firstDefined(r.symbol, r.ticker, r.sym)) === s) || rows[0] || null;
+}
+
 async function polygonQuote(sym) {
   if (!POLYGON_KEY) throw new Error('missing POLYGON_KEY');
   const s = cleanSym(sym);
@@ -150,29 +182,53 @@ async function polygonQuote(sym) {
 async function fmpQuote(sym) {
   if (!FMP_KEY) throw new Error('missing FMP_KEY');
   const s = cleanSym(sym);
-  const j = await getJSON(FMP_V3 + '/quote/' + encodeURIComponent(s) + '?apikey=' + encodeURIComponent(FMP_KEY));
-  const q = Array.isArray(j) ? j[0] : j;
-  if (!q) throw new Error('FMP quote not found');
-  const price = num(q.price);
-  if (price === null) throw new Error('FMP returned no usable price');
-  const asOf = stampFromSec(q.timestamp) || new Date().toISOString();
-  return okQuote(s, {
-    ok: true,
-    c: round(price),
-    dp: round(pct(q.changesPercentage !== undefined ? q.changesPercentage : q.changePercentage)),
-    price: round(price),
-    prevClose: round(q.previousClose),
-    volume: num(q.volume),
-    yearHigh: round(q.yearHigh),
-    yearLow: round(q.yearLow),
-    pe: round(q.pe),
-    source: 'FMP Quote',
-    provider: 'fmp',
-    asOf,
-    stale: staleFrom(asOf, 96),
-    delayed: true,
-    currency: 'USD',
-  });
+  const urls = [
+    FMP_STABLE + '/quote?symbol=' + encodeURIComponent(s) + '&apikey=' + encodeURIComponent(FMP_KEY),
+    FMP_STABLE + '/quote-short?symbol=' + encodeURIComponent(s) + '&apikey=' + encodeURIComponent(FMP_KEY),
+    FMP_V3 + '/quote/' + encodeURIComponent(s) + '?apikey=' + encodeURIComponent(FMP_KEY),
+  ];
+  let lastErr = '';
+  for (const url of urls) {
+    try {
+      const j = await getJSON(url);
+      const q = firstMatchingRow(j, s);
+      if (!q) {
+        lastErr = 'FMP quote not found';
+        continue;
+      }
+      const price = num(firstDefined(q.price, q.lastPrice, q.close, q.dayClose, q.ask, q.bid));
+      if (price === null) {
+        lastErr = 'FMP returned no usable price';
+        continue;
+      }
+      const prevClose = num(firstDefined(q.previousClose, q.prevClose, q.previous_close));
+      const dpRaw = firstDefined(q.changesPercentage, q.changePercentage, q.percentChange, q.changePercent, q.change_percent);
+      const dp = pct(dpRaw);
+      const change = num(firstDefined(q.change, q.changeInPrice, q.priceChange));
+      const asOf = stampFromValue(firstDefined(q.timestamp, q.lastUpdated, q.updatedAt, q.date)) || new Date().toISOString();
+      return okQuote(s, {
+        ok: true,
+        c: round(price),
+        dp: round(dp === null && prevClose ? (price - prevClose) / prevClose * 100 : dp),
+        price: round(price),
+        prevClose: round(prevClose),
+        change: round(change),
+        volume: num(firstDefined(q.volume, q.avgVolume, q.averageVolume)),
+        yearHigh: round(firstDefined(q.yearHigh, q.year_high, q.high52, q['52WeekHigh'])),
+        yearLow: round(firstDefined(q.yearLow, q.year_low, q.low52, q['52WeekLow'])),
+        pe: round(firstDefined(q.pe, q.peRatio, q.priceEarningsRatio)),
+        source: url.includes('/stable/') ? 'FMP Stable Quote' : 'FMP Quote',
+        provider: 'fmp',
+        asOf,
+        stale: staleFrom(asOf, 96),
+        delayed: true,
+        currency: firstDefined(q.currency, q.currencyCode, 'USD'),
+      });
+    } catch (e) {
+      lastErr = providerError(e);
+    }
+  }
+  throw new Error(lastErr || 'FMP quote not found');
 }
 
 async function quoteFor(sym) {
@@ -193,18 +249,30 @@ async function quoteFor(sym) {
 async function fmpProfile(sym) {
   if (!FMP_KEY) throw new Error('missing FMP_KEY');
   const s = cleanSym(sym);
-  const j = await getJSON(FMP_V3 + '/profile/' + encodeURIComponent(s) + '?apikey=' + encodeURIComponent(FMP_KEY));
-  const p = Array.isArray(j) ? j[0] : j;
-  if (!p) throw new Error('FMP profile not found');
+  const urls = [
+    FMP_STABLE + '/profile?symbol=' + encodeURIComponent(s) + '&apikey=' + encodeURIComponent(FMP_KEY),
+    FMP_V3 + '/profile/' + encodeURIComponent(s) + '?apikey=' + encodeURIComponent(FMP_KEY),
+  ];
+  let p = null;
+  let lastErr = '';
+  for (const url of urls) {
+    try {
+      p = firstMatchingRow(await getJSON(url), s);
+      if (p) break;
+    } catch (e) {
+      lastErr = providerError(e);
+    }
+  }
+  if (!p) throw new Error(lastErr || 'FMP profile not found');
   return {
     ok: true,
-    symbol: p.symbol || s,
-    name: p.companyName || p.companyNameLong || p.symbol || s,
+    symbol: firstDefined(p.symbol, p.ticker, s),
+    name: firstDefined(p.companyName, p.companyNameLong, p.companyNameEnglish, p.name, p.symbol, s),
     sector: p.sector || null,
     industry: p.industry || null,
     finnhubIndustry: p.sector || p.industry || null,
     currency: p.currency || 'USD',
-    exchange: p.exchangeShortName || p.exchange || null,
+    exchange: firstDefined(p.exchangeShortName, p.exchange, p.exchangeFullName),
     beta: num(p.beta),
     source: 'FMP Profile',
   };
@@ -261,21 +329,87 @@ async function fmpTarget(sym) {
 async function fmpIndicator(sym, type) {
   if (!FMP_KEY) throw new Error('missing FMP_KEY');
   const s = cleanSym(sym);
-  const url = FMP_V3 + '/technical_indicator/daily/' + encodeURIComponent(s) + '?period=14&type=' + encodeURIComponent(type) + '&apikey=' + encodeURIComponent(FMP_KEY);
-  const j = await getJSON(url);
-  const row = Array.isArray(j) ? j[0] : j;
-  const val = row && (row[type] !== undefined ? row[type] : row.value);
-  return round(val, type === 'rsi' ? 0 : 2);
+  const urls = [
+    FMP_STABLE + '/technical-indicators/' + encodeURIComponent(type) + '?symbol=' + encodeURIComponent(s) + '&periodLength=14&timeframe=1day&apikey=' + encodeURIComponent(FMP_KEY),
+    FMP_STABLE + '/technical-indicators?symbol=' + encodeURIComponent(s) + '&type=' + encodeURIComponent(type) + '&period=14&apikey=' + encodeURIComponent(FMP_KEY),
+    FMP_V3 + '/technical_indicator/daily/' + encodeURIComponent(s) + '?period=14&type=' + encodeURIComponent(type) + '&apikey=' + encodeURIComponent(FMP_KEY),
+  ];
+  let lastErr = '';
+  for (const url of urls) {
+    try {
+      const row = rowsFrom(await getJSON(url)).find(Boolean);
+      const val = row && firstDefined(row[type], row.value, row.indicatorValue, row[type.toUpperCase()]);
+      const out = round(val, type === 'rsi' ? 0 : 2);
+      if (out !== null) return out;
+      lastErr = 'indicator unavailable';
+    } catch (e) {
+      lastErr = providerError(e);
+    }
+  }
+  throw new Error(lastErr || 'indicator unavailable');
+}
+
+function earningsDateKey(row) {
+  const raw = firstDefined(row && row.date, row && row.reportDate, row && row.earningsDate, row && row.fiscalDateEnding);
+  const m = String(raw || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? m[1] + '-' + m[2] + '-' + m[3] : null;
+}
+
+function daysBetweenKeys(fromKey, toKey) {
+  const a = parseEventDate(fromKey);
+  const b = parseEventDate(toKey);
+  return a && b ? Math.round((b - a) / 864e5) : null;
+}
+
+function selectEarningsRow(value, sym, fromKey, toKey) {
+  const s = cleanSym(sym);
+  const rows = rowsFrom(value).filter(Boolean);
+  const hasSymbols = rows.some(r => firstDefined(r.symbol, r.ticker, r.sym));
+  const matches = rows
+    .map(row => ({ row, date: earningsDateKey(row), symbol: cleanSym(firstDefined(row.symbol, row.ticker, row.sym)) }))
+    .filter(x => x.date && x.date >= fromKey && x.date <= toKey)
+    .filter(x => !hasSymbols || x.symbol === s)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  return matches.length ? matches[0].row : null;
+}
+
+async function nextFmpEarnings(sym, fromKey, toKey) {
+  const s = cleanSym(sym);
+  const urls = [
+    FMP_STABLE + '/earnings-calendar?symbol=' + encodeURIComponent(s) + '&from=' + encodeURIComponent(fromKey) + '&to=' + encodeURIComponent(toKey) + '&apikey=' + encodeURIComponent(FMP_KEY),
+    FMP_STABLE + '/earnings-calendar?from=' + encodeURIComponent(fromKey) + '&to=' + encodeURIComponent(toKey) + '&apikey=' + encodeURIComponent(FMP_KEY),
+    FMP_V3 + '/earning_calendar?symbol=' + encodeURIComponent(s) + '&from=' + encodeURIComponent(fromKey) + '&to=' + encodeURIComponent(toKey) + '&apikey=' + encodeURIComponent(FMP_KEY),
+    FMP_V3 + '/earning_calendar?from=' + encodeURIComponent(fromKey) + '&to=' + encodeURIComponent(toKey) + '&apikey=' + encodeURIComponent(FMP_KEY),
+  ];
+  let lastErr = '';
+  for (const url of urls) {
+    try {
+      const row = selectEarningsRow(await getJSON(url), s, fromKey, toKey);
+      if (row) return row;
+      lastErr = 'no matched earnings for ' + s;
+    } catch (e) {
+      lastErr = providerError(e);
+    }
+  }
+  console.warn('earnings unavailable', s, lastErr);
+  return null;
 }
 
 async function fmpEarnings(sym) {
   if (!FMP_KEY) throw new Error('missing FMP_KEY');
   const s = cleanSym(sym);
   const today = new Date().toISOString().slice(0, 10);
-  const to = new Date(Date.now() + 150 * 864e5).toISOString().slice(0, 10);
-  const j = await getJSON(FMP_STABLE + '/earnings-calendar?symbol=' + encodeURIComponent(s) + '&from=' + today + '&to=' + to + '&apikey=' + encodeURIComponent(FMP_KEY));
-  const d = Array.isArray(j) && j.length ? j[0].date : null;
-  return { earnDays: d ? Math.round((new Date(d) - new Date()) / 864e5) : null, date: d, source: 'FMP Earnings Calendar' };
+  const to = new Date(Date.now() + 365 * 864e5).toISOString().slice(0, 10);
+  const row = await nextFmpEarnings(s, today, to);
+  const d = row && earningsDateKey(row);
+  return {
+    earnDays: d ? daysBetweenKeys(today, d) : null,
+    date: d,
+    symbol: row ? firstDefined(row.symbol, row.ticker, s) : s,
+    confirmed: row ? firstDefined(row.confirmed, row.isConfirmed, null) : null,
+    time: row ? firstDefined(row.time, row.session, null) : null,
+    source: 'FMP Earnings Calendar',
+  };
 }
 
 function eventDateKey(d) {
@@ -419,10 +553,9 @@ async function fmpMajorEarningsEvents(fromKey, toKey) {
   const events = [];
   await Promise.all(MARKET_MOVING_EARNINGS.map(async ([sym, cn, reason, impact]) => {
     try {
-      const j = await getJSON(FMP_STABLE + '/earnings-calendar?symbol=' + encodeURIComponent(sym) + '&from=' + encodeURIComponent(fromKey) + '&to=' + encodeURIComponent(toKey) + '&apikey=' + encodeURIComponent(FMP_KEY));
-      const row = Array.isArray(j) ? j.find(x => x && x.date) : null;
+      const row = await nextFmpEarnings(sym, fromKey, toKey);
       if (!row) return;
-      const d = String(row.date || '').slice(0, 10);
+      const d = earningsDateKey(row);
       if (!d) return;
       events.push({
         date: d,
@@ -475,9 +608,9 @@ function statusPayload() {
     missing,
     sources: {
       quotePrimary: POLYGON_KEY ? 'Polygon Snapshot' : 'missing',
-      quoteFallback: FMP_KEY ? 'FMP Quote' : 'missing',
+      quoteFallback: FMP_KEY ? 'FMP Stable Quote' : 'missing',
       fundamentals: FMP_KEY ? 'FMP' : 'missing',
-      technicals: FMP_KEY ? 'FMP Technical Indicator' : 'missing',
+      technicals: FMP_KEY ? 'FMP Stable Technical Indicators' : 'missing',
       events: FMP_KEY ? 'FMP Economic/Earnings Calendar + curated Fed schedule' : 'curated Fed schedule only; missing FMP_KEY',
       ai: ANTHROPIC_API_KEY ? 'Claude API' : 'missing',
       holdings: REPO && GTOKEN ? 'GitHub Contents API' : 'missing',

@@ -662,9 +662,11 @@ const DataProvider = {
         const warnings=[];
         if(!isNum(q.c) || q.c<=0) warnings.push('现价缺失');
         if(q.stale) warnings.push('行情可能过期');
+        if(q.error) warnings.push(String(q.error).slice(0,180));
         if(!isNum(t.targetMean)) warnings.push('目标价缺失');
         if(!isNum(rsiR.rsi)) warnings.push('RSI缺失');
         if(!isNum(atrR.atr)) warnings.push('ATR缺失');
+        if(earnR.error) warnings.push('财报日期缺失');
         const pxCurrency=(prof.currency||q.currency||h.currency||'USD').toUpperCase();
         if(h.currency && pxCurrency && h.currency!==pxCurrency) warnings.push('币种不一致 '+pxCurrency+'/'+h.currency);
         const metric=m.metric||{};
@@ -678,6 +680,8 @@ const DataProvider = {
           rsi:      isNum(rsiR.rsi) ? rsiR.rsi : null,
           atr:      isNum(atrR.atr) ? atrR.atr : null,
           earnDays: isNum(earnR.earnDays) ? earnR.earnDays : null,
+          earnDate: earnR.date || null,
+          earnSource: earnR.source || null,
           dataWarnings:warnings,
           quoteSource:q.source||null, quoteAsOf:q.asOf||null,
           targetSource:t.source||null,
@@ -983,7 +987,7 @@ async function getAIAdvice(market,port,pos,panic,sw,events,alerts){
       rows:port.rows.map(r=>({
         sym:r.sym,name:r.name,shares:r.shares,cost:r.cost,price:r.price,chg:r.chg,weight:r.weight,
         pnl:r.pnl,pnlPct:r.pnlPct,target:r.target,upside:r.upside,rsi:r.rsi,atr:r.atr,
-        distStop:r.distStop,earnDays:r.earnDays,quoteSource:r.quoteSource,quoteAsOf:r.quoteAsOf,
+        distStop:r.distStop,earnDays:r.earnDays,earnDate:r.earnDate,quoteSource:r.quoteSource,quoteAsOf:r.quoteAsOf,
         targetSource:r.targetSource,dataWarnings:r.dataWarnings||[],
       })),
     },
@@ -1121,7 +1125,7 @@ function render(){
       <td class="mono">${r.target==null?'—':'$'+r.target} ${r.upside==null?'':`<span class="${r.upside>=0?'up':'down'}">(${r.upside>=0?'+':''}${r.upside.toFixed(0)}%)</span>`}<small class="muted" style="display:block;font-size:10.5px">${r.targetSource?cleanText(r.targetSource):''}</small></td>
       <td class="mono ${r.rsi>=70?'down':r.rsi<=42?'up':''}">${D(r.rsi)}</td>
       <td class="mono">${ds==null?'—':ds.toFixed(1)+'%'}<span class="stopbar"><i style="width:${stopPctW}%;background:${stopCol}"></i></span></td>
-      <td>${r.earnDays==null?'<span class="muted mono">—</span>':(r.earnSoon?`<span class="warn mono">${r.earnDays}天</span>`:`<span class="muted mono">${r.earnDays}天</span>`)}</td>
+      <td>${r.earnDays==null?'<span class="muted mono">—</span>':`<span class="${r.earnSoon?'warn':'muted'} mono">${r.earnDays}天</span>${r.earnDate?`<small class="muted" style="display:block;font-size:10.5px">${cleanText(r.earnDate)}</small>`:''}`}</td>
       <td><span class="tag-act" style="background:${abg};color:${ac}">${at}</span></td>
     </tr>`;
   }).join('')+`<tr style="border-top:2px solid var(--line2)">
