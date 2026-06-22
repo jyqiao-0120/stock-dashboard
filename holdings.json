@@ -18,8 +18,8 @@
     {
       "sym": "KLAC",
       "name": "科磊",
-      "shares": 1,
-      "cost": 1800,
+      "shares": 10,
+      "cost": 180,
       "currency": "USD"
     },
     {
@@ -42,17 +42,24 @@
       "sym": "GOOGL",
       "name": "谷歌",
       "note": "回调至 $165 可建仓",
-      "buy": 0,
+      "buy": 165,
       "currency": "USD"
     },
     {
       "sym": "AMD",
       "name": "超威半导体",
       "note": "等待 $150 支撑",
-      "buy": 0,
+      "buy": 150,
+      "currency": "USD"
+    },
+    {
+      "sym": "MU",
+      "name": "美光",
+      "note": "",
+      "buy": 1000,
       "currency": "USD"
     }
   ],
   "currency": "USD",
-  "updatedAt": "2026-06-22T17:54:29.779Z"
+  "updatedAt": "2026-06-22T18:13:39.037Z"
 }
