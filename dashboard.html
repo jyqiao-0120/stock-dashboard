@@ -383,6 +383,14 @@ const PROXY = new URLSearchParams(location.search).get('proxy') || DEFAULT_PROXY
 const USE_AI = true;   // 是否调用 Claude 做综合分析；后端未配置 ANTHROPIC_API_KEY 时自动回退到规则引擎
 const FETCH_TIMEOUT_MS = 12000;
 
+(function ensureFreshHtmlEntry(){
+  const params = new URLSearchParams(location.search);
+  if(location.protocol.startsWith('http') && !params.has('v') && !params.has('bust')){
+    params.set('v', String(Date.now()));
+    location.replace(location.pathname + '?' + params.toString() + location.hash);
+  }
+})();
+
 function isNum(v){ return typeof v === 'number' && Number.isFinite(v); }
 function toNumber(v){ const n=Number(v); return Number.isFinite(n)?n:null; }
 function cleanText(v){
