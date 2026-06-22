@@ -2,58 +2,57 @@
   "cash": 20000,
   "positions": [
     {
-      "sym": "COST",
-      "name": "好市多",
-      "shares": 3,
-      "cost": 978.6
-    },
-    {
       "sym": "QQQ",
       "name": "纳指100ETF",
       "shares": 3,
-      "cost": 711.6
+      "cost": 711.6,
+      "currency": "USD"
     },
     {
       "sym": "TSM",
       "name": "台积电",
       "shares": 5,
-      "cost": 410
+      "cost": 410,
+      "currency": "USD"
     },
     {
       "sym": "KLAC",
       "name": "科磊",
       "shares": 1,
-      "cost": 1800
+      "cost": 1800,
+      "currency": "USD"
     },
     {
       "sym": "MSFT",
       "name": "微软",
       "shares": 3,
-      "cost": 419.5
-    },
-    {
-      "sym": "CEG",
-      "name": "星座能源",
-      "shares": 2,
-      "cost": 268
+      "cost": 419.5,
+      "currency": "USD"
     },
     {
       "sym": "DRAM",
       "name": "内存ETF",
       "shares": 4,
-      "cost": 52
+      "cost": 52,
+      "currency": "USD"
     }
   ],
   "watchlist": [
     {
       "sym": "GOOGL",
       "name": "谷歌",
-      "note": "回调至 $165 可建仓"
+      "note": "回调至 $165 可建仓",
+      "buy": 0,
+      "currency": "USD"
     },
     {
       "sym": "AMD",
       "name": "超威半导体",
-      "note": "等待 $150 支撑"
+      "note": "等待 $150 支撑",
+      "buy": 0,
+      "currency": "USD"
     }
-  ]
+  ],
+  "currency": "USD",
+  "updatedAt": "2026-06-22T17:47:56.776Z"
 }
