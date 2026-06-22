@@ -326,19 +326,50 @@ async function fmpTarget(sym) {
   return { ok: false, targetMean: null, targetMedian: null, source: 'FMP Price Target Consensus', error: lastErr || 'target unavailable' };
 }
 
+function indicatorSlugs(type) {
+  if (type === 'atr') return ['atr', 'average-true-range', 'average-true-range-atr'];
+  if (type === 'rsi') return ['rsi', 'relative-strength-index'];
+  return [type];
+}
+
+function indicatorValue(row, type) {
+  if (!row) return null;
+  const direct = type === 'atr'
+    ? [row.atr, row.ATR, row.averageTrueRange, row.average_true_range, row.avgTrueRange, row.trueRange, row.atr14, row.value, row.indicatorValue]
+    : [row[type], row[type.toUpperCase()], row.value, row.indicatorValue];
+  for (const v of direct) {
+    const n = num(v);
+    if (n !== null) return n;
+  }
+  for (const [key, value] of Object.entries(row)) {
+    const k = key.toLowerCase();
+    if (type === 'atr' && (k === 'atr' || (k.includes('average') && k.includes('true') && k.includes('range')))) {
+      const n = num(value);
+      if (n !== null) return n;
+    }
+    if (type === 'rsi' && k === 'rsi') {
+      const n = num(value);
+      if (n !== null) return n;
+    }
+  }
+  return null;
+}
+
 async function fmpIndicator(sym, type) {
   if (!FMP_KEY) throw new Error('missing FMP_KEY');
   const s = cleanSym(sym);
-  const urls = [
-    FMP_STABLE + '/technical-indicators/' + encodeURIComponent(type) + '?symbol=' + encodeURIComponent(s) + '&periodLength=14&timeframe=1day&apikey=' + encodeURIComponent(FMP_KEY),
+  const urls = indicatorSlugs(type).flatMap(slug => [
+    FMP_STABLE + '/technical-indicators/' + encodeURIComponent(slug) + '?symbol=' + encodeURIComponent(s) + '&periodLength=14&timeframe=1day&apikey=' + encodeURIComponent(FMP_KEY),
+    FMP_STABLE + '/technical-indicators/' + encodeURIComponent(slug) + '?symbol=' + encodeURIComponent(s) + '&period=14&timeframe=1day&apikey=' + encodeURIComponent(FMP_KEY),
+  ]).concat([
     FMP_STABLE + '/technical-indicators?symbol=' + encodeURIComponent(s) + '&type=' + encodeURIComponent(type) + '&period=14&apikey=' + encodeURIComponent(FMP_KEY),
     FMP_V3 + '/technical_indicator/daily/' + encodeURIComponent(s) + '?period=14&type=' + encodeURIComponent(type) + '&apikey=' + encodeURIComponent(FMP_KEY),
-  ];
+  ]);
   let lastErr = '';
   for (const url of urls) {
     try {
       const row = rowsFrom(await getJSON(url)).find(Boolean);
-      const val = row && firstDefined(row[type], row.value, row.indicatorValue, row[type.toUpperCase()]);
+      const val = indicatorValue(row, type);
       const out = round(val, type === 'rsi' ? 0 : 2);
       if (out !== null) return out;
       lastErr = 'indicator unavailable';
