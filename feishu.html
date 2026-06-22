@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="cache-control" content="no-store, no-cache, must-revalidate">
+  <meta http-equiv="pragma" content="no-cache">
+  <title>JY's Stock Dashboard</title>
+  <script>
+    const target = new URL('dashboard.html', location.href);
+    target.searchParams.set('v', String(Date.now()));
+    location.replace(target.toString());
+  </script>
+</head>
+<body>
+  <a href="dashboard.html">打开股票看板</a>
+</body>
+</html>
