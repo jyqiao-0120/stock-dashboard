@@ -16,13 +16,6 @@
       "currency": "USD"
     },
     {
-      "sym": "KLAC",
-      "name": "科磊",
-      "shares": 10,
-      "cost": 180,
-      "currency": "USD"
-    },
-    {
       "sym": "MSFT",
       "name": "微软",
       "shares": 3,
@@ -61,5 +54,5 @@
     }
   ],
   "currency": "USD",
-  "updatedAt": "2026-06-23T13:55:34.778Z"
+  "updatedAt": "2026-06-23T16:01:46.393Z"
 }
