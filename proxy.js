@@ -590,8 +590,8 @@ function macroEventMeta(rawName, impact) {
     hit(/powell|warsh|fed chair|chairman|testimony/, '美联储主席讲话/国会证词', '美联储', '主席表态会影响市场对政策反应函数和沟通方式的判断。', '央行讲话') ||
     hit(/gdp|gross domestic product/, '美国GDP数据', '增长数据', '增长超预期可能推高利率预期，低于预期可能加重衰退担忧。') ||
     hit(/retail sales/, '美国零售销售', '消费数据', '消费韧性会影响盈利预期、通胀预期和美联储政策路径。') ||
+    hit(/ism services|ism.*services pmi|ism.*non.?manufacturing/, '美国ISM服务业PMI', '景气数据', '服务业景气和价格分项会影响通胀与增长判断。') ||
     hit(/ism manufacturing|ism.*manufacturing pmi/, '美国ISM制造业PMI', '景气数据', '制造业景气变化会影响周期股、美元和增长预期。') ||
-    hit(/ism services|ism.*services pmi|ism.*non-manufacturing/, '美国ISM服务业PMI', '景气数据', '服务业景气和价格分项会影响通胀与增长判断。') ||
     hit(/beige book/, '美联储褐皮书', '美联储', '褐皮书汇总地区经济和通胀线索，会影响下次议息预期。', '央行报告');
   if (!found) return null;
   return {

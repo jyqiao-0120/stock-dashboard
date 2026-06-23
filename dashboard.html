@@ -257,7 +257,7 @@ button{font-family:inherit;cursor:pointer}
       <div id="panicParts" style="margin-top:14px;font-size:12px;color:var(--tx2)"></div>
     </div>
     <div class="card">
-      <h3>未来 30 天重大事件</h3>
+      <h3>未来 1 个月重大事件</h3>
       <div id="events"></div>
     </div>
     <div class="card">
@@ -441,8 +441,8 @@ function clientMacroEventMeta(rawName, impact){
     hit(/powell|warsh|fed chair|chairman|testimony/, '美联储主席讲话/国会证词', '美联储', '主席表态会影响市场对政策反应函数和沟通方式的判断。', '央行讲话', 5) ||
     hit(/gdp|gross domestic product/, '美国GDP数据', '增长数据', '增长超预期可能推高利率预期，低于预期可能加重衰退担忧。') ||
     hit(/retail sales/, '美国零售销售', '消费数据', '消费韧性会影响盈利预期、通胀预期和美联储政策路径。') ||
+    hit(/ism services|ism.*services pmi|ism.*non.?manufacturing/, '美国ISM服务业PMI', '景气数据', '服务业景气和价格分项会影响通胀与增长判断。') ||
     hit(/ism manufacturing|ism.*manufacturing pmi/, '美国ISM制造业PMI', '景气数据', '制造业景气变化会影响周期股、美元和增长预期。') ||
-    hit(/ism services|ism.*services pmi|ism.*non-manufacturing/, '美国ISM服务业PMI', '景气数据', '服务业景气和价格分项会影响通胀与增长判断。') ||
     hit(/beige book/, '美联储褐皮书', '美联储', '褐皮书汇总地区经济和通胀线索，会影响下次议息预期。', '央行报告')
   );
 }
@@ -507,14 +507,15 @@ function normalizeMarketEvents(rawEvents){
       });
       continue;
     }
-    const meta=(chinese && e.note) ? {
+    const translated=clientMacroEventMeta(rawName, e.impact);
+    const meta=translated || ((chinese && e.note) ? {
       name:e.name,
       category:e.category||'重大事件',
       type:e.type||e.category||'重大事件',
       impact:e.impact||4,
       lean:e.lean||'neutral',
       note:e.note,
-    } : clientMacroEventMeta(rawName, e.impact);
+    } : null);
     if(!meta) continue;
     pushIfWindow({
       ...e,
@@ -558,6 +559,25 @@ async function fetchJSON(url, fallback=null, timeoutMs=FETCH_TIMEOUT_MS, options
     if(fallback && typeof fallback==='object' && !Array.isArray(fallback)) return {...fallback,ok:false,error:e.message};
     return fallback;
   }finally{ clearTimeout(timer); }
+}
+function sleep(ms){return new Promise(resolve=>setTimeout(resolve,ms));}
+function isNetworkErrorMessage(msg){
+  return /failed to fetch|network|abort|timeout|load failed|internet/i.test(String(msg||''));
+}
+async function postJSONWithRetry(url, payload, fallback){
+  const tries=[30000,45000];
+  let last=fallback;
+  for(let i=0;i<tries.length;i++){
+    last=await fetchJSON(url, fallback, tries[i], {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload),
+    });
+    if(last && last.ok) return last;
+    if(!isNetworkErrorMessage(last && last.error)) break;
+    if(i<tries.length-1) await sleep(1200);
+  }
+  return last;
 }
 function normalizeRemoteHolding(p){
   const sym=String(p.sym||p.symbol||'').trim().toUpperCase();
@@ -1017,14 +1037,31 @@ async function load(){
   const sw=computeSwitch(pos,port);
   const vixSig=computeVixSignal(market);
   const alerts=buildAlerts(port,events,vixSig);
-  const ai=await getAIAdvice(market,port,pos,panic,sw,events,alerts);
-  const actions=(ai && Array.isArray(ai.actions) && ai.actions.length) ? ai.actions : buildActions(port,sw,vixSig);
-  state={market,port,pos,panic,sw,vixSig,alerts,actions,events,snap,pfRaw,dips,ai};
+  const actions=buildActions(port,sw,vixSig);
+  state={market,port,pos,panic,sw,vixSig,alerts,actions,events,snap,pfRaw,dips,ai:null,aiPending:USE_AI};
   render();
+  if(USE_AI){
+    getAIAdvice(market,port,pos,panic,sw,events,alerts)
+      .then(ai=>{
+        if(!ai){
+          state={...state,ai:null,aiPending:false};
+          render();
+          return;
+        }
+        const aiActions=(Array.isArray(ai.actions)&&ai.actions.length) ? ai.actions : actions;
+        state={...state,ai,aiPending:false,actions:aiActions};
+        render();
+      })
+      .catch(e=>{
+        console.warn('Claude 分析失败', e);
+        state={...state,ai:null,aiPending:false};
+        render();
+      });
+  }
 }
 
 function render(){
-  const {market,port,pos,panic,sw,vixSig,alerts,actions,events,pfRaw,dips,ai}=state;
+  const {market,port,pos,panic,sw,vixSig,alerts,actions,events,pfRaw,dips,ai,aiPending}=state;
   document.getElementById('upd').textContent='数据截至 '+market.asOf+' · '+statusLine(market);
 
   // ticker
@@ -1094,7 +1131,7 @@ function render(){
     const note=e.note?`<small>${cleanText(e.note)}</small>`:'';
     const src=e.source?`<small>来源：${cleanText(e.source)}</small>`:'';
     return `<div class="ev"><span class="dt">${date}</span><span class="nm"><b>${cat}</b> · ${cleanText(e.name)}${note}${src}</span><span class="imp" title="影响强度 ${cleanText(e.impact||3)}/5">${bars}</span><span class="lean" style="background:${lbg};color:${lc}">${lt}</span></div>`;
-  }).join(''):'<div class="muted" style="font-size:12.5px;padding:10px 0">未来 30 天暂无已识别的高影响事件；若缺少 FMP_KEY，则只能显示内置美联储日程。</div>';
+  }).join(''):'<div class="muted" style="font-size:12.5px;padding:10px 0">未来 1 个月暂无已识别的高影响事件；若缺少 FMP_KEY，则只能显示内置美联储日程。</div>';
 
   // switch
   const stoneCol={trim:'var(--down)',add:'var(--up)',hold:'var(--tx2)'};
@@ -1103,7 +1140,7 @@ function render(){
   const aiIssues=Array.isArray(ai?.dataIssues)?ai.dataIssues.slice(0,3):[];
   document.getElementById('switchAdvice').innerHTML=
     `<div style="font-size:32px;font-family:var(--disp);font-weight:700;margin-bottom:4px" class="mono">${sw.current.toFixed(0)}<span style="font-size:15px;color:var(--tx3)"> / ${Math.round(aiPos)}%</span></div>
-     <div class="muted" style="font-size:11px;margin-bottom:12px">当前实际 / ${ai?'Claude建议':'模型建议'}</div>
+     <div class="muted" style="font-size:11px;margin-bottom:12px">当前实际 / ${ai?'Claude建议':aiPending?'Claude分析中':'模型建议'}</div>
      <div class="verdict" style="border-color:${stoneCol[sw.tone]}33;font-size:13px;line-height:1.6">${cleanText(aiTxt)}${aiIssues.length?'<br><small class="muted">数据质量：'+cleanText(aiIssues.join(' / '))+'</small>':''}</div>`;
 
   // holdings
@@ -1348,7 +1385,7 @@ async function saveManage(){
     const btn=document.getElementById('mgrSave'), oldTxt=btn.textContent;
     btn.disabled=true; btn.textContent='保存中...';
     try{
-      const d=await fetchJSON(PROXY + '/api/holdings',{ok:false,error:'保存失败'},15000,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(syncData)});
+      const d=await postJSONWithRetry(PROXY + '/api/holdings',{...syncData,_clientSavedAt:new Date().toISOString()},{ok:false,error:'保存失败'});
       if(!d.ok){
         const err=new Error(d.error||'保存失败');
         err.detail=d;
@@ -1362,7 +1399,9 @@ async function saveManage(){
       saveStore('portfolio',store.portfolio);
     }catch(e){
       const detail=e.detail||{};
-      const help=detail.help || '请在 Render 的 GITHUB_TOKEN 中确认已授予 jyqiao-0120/stock-dashboard 仓库 Contents: Read and write 权限。';
+      const networkHelp='浏览器没有连上 Render 后端。请先刷新页面后再点保存；如果还失败，打开 '+PROXY+'/api/status 检查是否能看到 ok:true。当前内容已经保存在本机浏览器，不会丢。';
+      const tokenHelp='请在 Render 的 GITHUB_TOKEN 中确认已授予 jyqiao-0120/stock-dashboard 仓库 Contents: Read and write 权限。';
+      const help=detail.help || (isNetworkErrorMessage(e.message) ? networkHelp : tokenHelp);
       store.portfolio={...store.portfolio,_localUnsynced:true,_syncError:e.message,_syncHelp:help};
       saveStore('portfolio',store.portfolio);
       alert('已先保存到本机浏览器，但没有同步到 GitHub。\n原因：'+e.message+'\n\n'+help+'\n\n修好 token 后，在本页面再次点击保存即可同步。');
