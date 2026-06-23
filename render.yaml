@@ -17,3 +17,11 @@ services:
         sync: false
       - key: GITHUB_REPO
         sync: false
+      - key: FEISHU_WEBHOOK_URL
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: ALERT_EMAIL_TO
+        sync: false
+      - key: ALERT_EMAIL_FROM
+        sync: false

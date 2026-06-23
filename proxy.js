@@ -9,6 +9,12 @@
 //    GITHUB_TOKEN       GitHub token with contents read/write access
 //    GITHUB_REPO        owner/repo, e.g. jyqiao-0120/stock-dashboard
 //
+//  Optional notification environment variables:
+//    FEISHU_WEBHOOK_URL Incoming webhook for Feishu alerts
+//    RESEND_API_KEY     Resend API key for email alerts
+//    ALERT_EMAIL_TO     Email recipient, comma separated
+//    ALERT_EMAIL_FROM   Verified sender email, e.g. alerts@yourdomain.com
+//
 //  Notes:
 //    - Frontend never sees provider/API keys.
 //    - Endpoints keep the old response fields where possible for compatibility.
@@ -28,6 +34,10 @@ const CLAUDE_MODEL = process.env.CLAUDE_MODEL || process.env.AI_MODEL || 'claude
 const GH = 'https://api.github.com';
 const REPO = process.env.GITHUB_REPO || '';
 const GTOKEN = process.env.GITHUB_TOKEN || '';
+const FEISHU_WEBHOOK_URL = process.env.FEISHU_WEBHOOK_URL || '';
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+const ALERT_EMAIL_TO = process.env.ALERT_EMAIL_TO || '';
+const ALERT_EMAIL_FROM = process.env.ALERT_EMAIL_FROM || 'onboarding@resend.dev';
 const HFILE = 'holdings.json';
 const POLYGON = 'https://api.polygon.io';
 const FMP_V3 = 'https://financialmodelingprep.com/api/v3';
@@ -86,6 +96,12 @@ function staleFrom(asOf, maxHours = 96) {
 
 function providerError(err) {
   return err && err.message ? err.message : String(err || 'unknown error');
+}
+
+function pctOrNull(numerator, denominator) {
+  const a = num(numerator);
+  const b = num(denominator);
+  return a !== null && b ? a / b * 100 : null;
 }
 
 async function getJSON(url, options = {}) {
@@ -324,6 +340,92 @@ async function fmpTarget(sym) {
     }
   }
   return { ok: false, targetMean: null, targetMedian: null, source: 'FMP Price Target Consensus', error: lastErr || 'target unavailable' };
+}
+
+const DIP_UNIVERSE = [
+  'NVDA','MSFT','AAPL','AMZN','GOOGL','META','TSLA','AVGO','AMD','NFLX',
+  'ADBE','CRM','NOW','ORCL','SNOW','PLTR','CRWD','PANW','DDOG','NET',
+  'TSM','ASML','AMAT','LRCX','KLAC','MU','ARM','MRVL','QCOM','TXN',
+  'INTC','ADI','NXPI','ON','SMH','SOXX','QQQ','COST','BKNG','INTU'
+];
+
+function dipLogic(sym, profile, q, target, rsi, scoreParts) {
+  const sector = profile.sector || profile.industry || '科技/成长';
+  const bits = [];
+  if (scoreParts.drawdown !== null) bits.push('距52周高回撤 ' + Math.round(scoreParts.drawdown) + '%');
+  if (scoreParts.upside !== null) bits.push('分析师共识上行空间约 ' + Math.round(scoreParts.upside) + '%');
+  if (rsi !== null) bits.push('RSI ' + Math.round(rsi));
+  if (q.delayed) bits.push('当前接受延迟行情');
+  return (profile.name || sym) + ' 属于 ' + sector + ' 头部/热门链条标的；' + bits.join('，') + '。用于 1-3 个月波段候选，仍需结合财报窗口和仓位上限确认。';
+}
+
+async function buildDipCandidate(sym) {
+  const s = cleanSym(sym);
+  const [q, target, profile, rsi] = await Promise.all([
+    quoteFor(s),
+    fmpTarget(s).catch(e => ({ ok: false, targetMean: null, error: providerError(e) })),
+    fmpProfile(s).catch(e => ({ ok: false, symbol: s, name: s, sector: null, industry: null, error: providerError(e) })),
+    fmpIndicator(s, 'rsi').catch(() => null),
+  ]);
+  const price = num(q.price || q.c);
+  const high52 = num(q.yearHigh);
+  const low52 = num(q.yearLow);
+  if (!price || !high52 || !low52 || high52 <= low52) return null;
+  const drawdown = pctOrNull(high52 - price, high52);
+  const rangePos = pctOrNull(price - low52, high52 - low52);
+  const targetMean = num(target.targetMean);
+  const upside = targetMean ? pctOrNull(targetMean - price, price) : null;
+  if (drawdown === null || drawdown < 8) return null;
+  if (rangePos !== null && rangePos > 78) return null;
+
+  let score = 0;
+  score += Math.min(35, drawdown * 0.8);
+  if (rangePos !== null) score += Math.max(0, 25 - rangePos * 0.35);
+  if (upside !== null) score += Math.max(0, Math.min(30, upside * 0.8));
+  if (rsi !== null) score += rsi <= 45 ? 15 : rsi <= 55 ? 8 : rsi <= 65 ? 2 : -10;
+  if (['NVDA','MSFT','AVGO','AMD','TSM','ASML','AMAT','LRCX','KLAC','MU','SMH','SOXX','QQQ'].includes(s)) score += 8;
+
+  const buy = round(Math.max(low52, price * 0.97));
+  return {
+    sym: s,
+    name: profile.name || s,
+    sector: profile.sector || profile.industry || '科技/成长',
+    price: round(price),
+    low52: round(low52),
+    high52: round(high52),
+    buy,
+    target: targetMean ? round(targetMean) : null,
+    rsi,
+    score: round(score, 1),
+    drawdown: round(drawdown, 1),
+    upside: upside === null ? null : round(upside, 1),
+    source: [q.source || 'quote', target.source || 'target', 'FMP Profile/RSI'].filter(Boolean).join(' + '),
+    asOf: q.asOf || null,
+    delayed: q.delayed === true,
+    warnings: q.warnings || [],
+    logic: dipLogic(s, profile, q, target, rsi, { drawdown, upside }),
+  };
+}
+
+async function mapLimit(items, limit, worker) {
+  const out = [];
+  let next = 0;
+  async function run() {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await worker(items[i]).catch(e => ({ error: providerError(e), sym: items[i] }));
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
+  return out;
+}
+
+async function dipLeaders(limit = 8) {
+  const rows = await mapLimit(DIP_UNIVERSE, 5, buildDipCandidate);
+  return rows
+    .filter(r => r && !r.error && r.price && r.high52)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
 }
 
 function indicatorSlugs(type) {
@@ -688,12 +790,26 @@ function statusPayload() {
   return {
     ok: missing.length === 0,
     missing,
+    policy: {
+      broker: 'hk盈立证券 / uSMART，当前按手动维护仓位处理',
+      capitalUsd: 50000,
+      maxSingleWeightPct: 50,
+      horizon: '波段或中长线，1-3个月',
+      delayedQuotesAccepted: true,
+      dipUniverse: '纳指100 + 半导体 + AI热门板块',
+    },
+    notifications: {
+      feishu: !!FEISHU_WEBHOOK_URL,
+      email: !!(RESEND_API_KEY && ALERT_EMAIL_TO),
+      emailProvider: RESEND_API_KEY ? 'Resend API' : 'missing',
+    },
     sources: {
       quotePrimary: POLYGON_KEY ? 'Polygon Snapshot' : 'missing',
       quoteFallback: FMP_KEY ? 'FMP Stable Quote' : 'missing',
       fundamentals: FMP_KEY ? 'FMP' : 'missing',
       technicals: FMP_KEY ? 'FMP Stable Technical Indicators' : 'missing',
       events: FMP_KEY ? 'FMP Economic/Earnings Calendar + curated Fed schedule' : 'curated Fed schedule only; missing FMP_KEY',
+      dipLeaders: FMP_KEY ? 'FMP quote/profile/target/RSI over Nasdaq100 + Semis + AI universe' : 'missing',
       ai: ANTHROPIC_API_KEY ? 'Claude API' : 'missing',
       holdings: REPO && GTOKEN ? 'GitHub Contents API' : 'missing',
     },
@@ -702,6 +818,44 @@ function statusPayload() {
 }
 
 app.get('/api/status', (req, res) => res.json(statusPayload()));
+
+function alertText(payload) {
+  const title = String(payload.title || '股票看板提醒').slice(0, 120);
+  const body = String(payload.body || payload.message || '').slice(0, 3000);
+  const level = String(payload.level || 'info').toUpperCase();
+  return '[' + level + '] ' + title + (body ? '\n' + body : '');
+}
+
+async function sendFeishu(payload) {
+  if (!FEISHU_WEBHOOK_URL) return { ok: false, skipped: true, channel: 'feishu', reason: 'missing FEISHU_WEBHOOK_URL' };
+  const j = await getJSON(FEISHU_WEBHOOK_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ msg_type: 'text', content: { text: alertText(payload) } }),
+  });
+  return { ok: true, channel: 'feishu', response: j };
+}
+
+async function sendEmail(payload) {
+  if (!RESEND_API_KEY || !ALERT_EMAIL_TO) return { ok: false, skipped: true, channel: 'email', reason: 'missing RESEND_API_KEY or ALERT_EMAIL_TO' };
+  const j = await getJSON('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + RESEND_API_KEY },
+    body: JSON.stringify({
+      from: ALERT_EMAIL_FROM,
+      to: ALERT_EMAIL_TO.split(',').map(s => s.trim()).filter(Boolean),
+      subject: String(payload.title || '股票看板提醒').slice(0, 120),
+      text: alertText(payload),
+    }),
+  });
+  return { ok: true, channel: 'email', response: j };
+}
+
+app.post('/api/notify', async (req, res) => {
+  const payload = req.body || {};
+  const results = await Promise.all([sendFeishu(payload), sendEmail(payload)].map(p => p.catch(e => ({ ok: false, error: providerError(e) }))));
+  res.json({ ok: results.some(r => r.ok), results });
+});
 
 app.get('/api/quote/:sym', async (req, res) => {
   try { res.json(await quoteFor(req.params.sym)); }
@@ -727,6 +881,23 @@ app.get('/api/metrics/:sym', async (req, res) => {
 app.get('/api/target/:sym', async (req, res) => {
   try { res.json(await fmpTarget(req.params.sym)); }
   catch (e) { res.json({ ok: false, targetMean: null, targetMedian: null, source: 'FMP Price Target Consensus', error: providerError(e) }); }
+});
+
+app.get('/api/dip-leaders', async (req, res) => {
+  const limit = Math.max(3, Math.min(12, num(req.query.limit) || 8));
+  try {
+    const items = await dipLeaders(limit);
+    res.json({
+      ok: true,
+      items,
+      universe: 'nasdaq100,semis,ai',
+      policy: { capitalUsd: 50000, maxSingleWeightPct: 50, horizon: '1-3 months', delayedQuotesAccepted: true },
+      source: 'FMP quote/profile/target/RSI + Polygon/FMP quote fallback',
+      asOf: new Date().toISOString(),
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, items: [], error: providerError(e), source: 'dip leaders screener' });
+  }
 });
 
 app.get('/api/rsi/:sym', async (req, res) => {
