@@ -489,6 +489,7 @@ function sortedDailyBars(value) {
       high: num(firstDefined(row.high, row.h)),
       low: num(firstDefined(row.low, row.l)),
       close: num(firstDefined(row.close, row.c, row.adjClose, row.adj_close)),
+      volume: num(firstDefined(row.volume, row.v, row.vol)),
     }))
     .filter(row => row.date && row.high !== null && row.low !== null && row.close !== null)
     .sort((a, b) => a.date.localeCompare(b.date));
@@ -531,6 +532,108 @@ async function fmpHistoricalAtr(sym, period = 14) {
     }
   }
   throw new Error(lastErr || 'historical ATR unavailable');
+}
+
+function avg(values) {
+  const xs = (values || []).map(num).filter(v => v !== null);
+  return xs.length ? xs.reduce((s, v) => s + v, 0) / xs.length : null;
+}
+
+function smaFromBars(bars, period, endIndex) {
+  const end = endIndex === undefined ? bars.length : endIndex + 1;
+  if (!Array.isArray(bars) || end < period) return null;
+  return avg(bars.slice(end - period, end).map(b => b.close));
+}
+
+function consecutiveVsSma(bars, period, direction) {
+  if (!Array.isArray(bars) || bars.length < period) return 0;
+  let count = 0;
+  for (let i = bars.length - 1; i >= period - 1; i--) {
+    const ma = smaFromBars(bars, period, i);
+    if (ma === null) break;
+    const close = num(bars[i].close);
+    if (close === null) break;
+    const ok = direction === 'below' ? close < ma : close > ma;
+    if (!ok) break;
+    count++;
+  }
+  return count;
+}
+
+async function fmpHistoricalBars(sym, days = 420) {
+  if (!FMP_KEY) throw new Error('missing FMP_KEY');
+  const s = cleanSym(sym);
+  const to = new Date().toISOString().slice(0, 10);
+  const from = new Date(Date.now() - Math.max(days, 260) * 1.8 * 864e5).toISOString().slice(0, 10);
+  const urls = [
+    FMP_STABLE + '/historical-price-eod/full?symbol=' + encodeURIComponent(s) + '&from=' + from + '&to=' + to + '&apikey=' + encodeURIComponent(FMP_KEY),
+    FMP_STABLE + '/historical-price-eod/light?symbol=' + encodeURIComponent(s) + '&from=' + from + '&to=' + to + '&apikey=' + encodeURIComponent(FMP_KEY),
+    FMP_STABLE + '/historical-chart/1day?symbol=' + encodeURIComponent(s) + '&from=' + from + '&to=' + to + '&apikey=' + encodeURIComponent(FMP_KEY),
+    FMP_V3 + '/historical-price-full/' + encodeURIComponent(s) + '?from=' + from + '&to=' + to + '&apikey=' + encodeURIComponent(FMP_KEY),
+  ];
+  let lastErr = '';
+  for (const url of urls) {
+    try {
+      const bars = sortedDailyBars(await getJSON(url));
+      if (bars.length >= 60) return bars.slice(-days);
+      lastErr = 'not enough daily bars';
+    } catch (e) {
+      lastErr = providerError(e);
+    }
+  }
+  throw new Error(lastErr || 'historical bars unavailable');
+}
+
+function technicalSnapshotFromBars(sym, bars) {
+  const s = cleanSym(sym);
+  if (!Array.isArray(bars) || bars.length < 60) throw new Error('not enough bars for ' + s);
+  const last = bars[bars.length - 1];
+  const prev = bars[bars.length - 2] || null;
+  const sma5 = smaFromBars(bars, 5);
+  const sma10 = smaFromBars(bars, 10);
+  const sma20 = smaFromBars(bars, 20);
+  const sma50 = smaFromBars(bars, 50);
+  const sma200 = smaFromBars(bars, 200);
+  const close = num(last.close);
+  const prevClose = prev ? num(prev.close) : null;
+  const volume = num(last.volume);
+  const avgVol20 = avg(bars.slice(-20).map(b => b.volume));
+  const green = close !== null && prevClose !== null && close > prevClose;
+  return {
+    ok: true,
+    sym: s,
+    close: round(close),
+    prevClose: round(prevClose),
+    changePct: close !== null && prevClose ? round((close - prevClose) / prevClose * 100) : null,
+    volume,
+    avgVol20: avgVol20 === null ? null : Math.round(avgVol20),
+    sma5: round(sma5),
+    sma10: round(sma10),
+    sma20: round(sma20),
+    sma50: round(sma50),
+    sma200: round(sma200),
+    above5: close !== null && sma5 !== null ? close > sma5 : null,
+    above10: close !== null && sma10 !== null ? close > sma10 : null,
+    above20: close !== null && sma20 !== null ? close > sma20 : null,
+    above50: close !== null && sma50 !== null ? close > sma50 : null,
+    above200: close !== null && sma200 !== null ? close > sma200 : null,
+    below20: close !== null && sma20 !== null ? close < sma20 : null,
+    below50: close !== null && sma50 !== null ? close < sma50 : null,
+    green,
+    highVolumeGreen: !!(green && volume && avgVol20 && volume >= avgVol20 * 1.2),
+    daysAbove10: consecutiveVsSma(bars, 10, 'above'),
+    daysAbove200: consecutiveVsSma(bars, 200, 'above'),
+    daysBelow200: consecutiveVsSma(bars, 200, 'below'),
+    bars: bars.length,
+    asOf: last.date,
+    source: 'FMP Historical EOD Moving Averages',
+    stale: staleFrom(last.date, 120),
+  };
+}
+
+async function fmpTechnicalsSnapshot(sym) {
+  const bars = await fmpHistoricalBars(sym, 420);
+  return technicalSnapshotFromBars(sym, bars);
 }
 
 function earningsDateKey(row) {
@@ -793,7 +896,9 @@ function statusPayload() {
     policy: {
       broker: 'hk盈立证券 / uSMART，当前按手动维护仓位处理',
       capitalUsd: 50000,
-      maxSingleWeightPct: 50,
+      maxSingleWeightPct: 20,
+      normalMaxGrossPct: 70,
+      cashReservePct: 30,
       horizon: '波段或中长线，1-3个月',
       delayedQuotesAccepted: true,
       dipUniverse: '纳指100 + 半导体 + AI热门板块',
@@ -807,7 +912,8 @@ function statusPayload() {
       quotePrimary: POLYGON_KEY ? 'Polygon Snapshot' : 'missing',
       quoteFallback: FMP_KEY ? 'FMP Stable Quote' : 'missing',
       fundamentals: FMP_KEY ? 'FMP' : 'missing',
-      technicals: FMP_KEY ? 'FMP Stable Technical Indicators' : 'missing',
+      technicals: FMP_KEY ? 'FMP Stable Technical Indicators + FMP Historical EOD moving averages' : 'missing',
+      tradingSystemV3: FMP_KEY ? '5万实盘版规则引擎：200日线/VIX/价格确认/仓位上限/止损/财报' : 'missing FMP_KEY for market regime',
       events: FMP_KEY ? 'FMP Economic/Earnings Calendar + curated Fed schedule' : 'curated Fed schedule only; missing FMP_KEY',
       dipLeaders: FMP_KEY ? 'FMP quote/profile/target/RSI over Nasdaq100 + Semis + AI universe' : 'missing',
       ai: ANTHROPIC_API_KEY ? 'Claude API' : 'missing',
@@ -891,12 +997,24 @@ app.get('/api/dip-leaders', async (req, res) => {
       ok: true,
       items,
       universe: 'nasdaq100,semis,ai',
-      policy: { capitalUsd: 50000, maxSingleWeightPct: 50, horizon: '1-3 months', delayedQuotesAccepted: true },
+      policy: { capitalUsd: 50000, maxSingleWeightPct: 20, normalMaxGrossPct: 70, cashReservePct: 30, horizon: '1-3 months', delayedQuotesAccepted: true },
       source: 'FMP quote/profile/target/RSI + Polygon/FMP quote fallback',
       asOf: new Date().toISOString(),
     });
   } catch (e) {
     res.status(500).json({ ok: false, items: [], error: providerError(e), source: 'dip leaders screener' });
+  }
+});
+
+app.get('/api/technicals/:sym', async (req, res) => {
+  try { res.json(await fmpTechnicalsSnapshot(req.params.sym)); }
+  catch (e) {
+    res.json({
+      ok: false,
+      sym: cleanSym(req.params.sym),
+      source: 'FMP Historical EOD Moving Averages',
+      error: providerError(e),
+    });
   }
 });
 

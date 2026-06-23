@@ -102,6 +102,23 @@ button{font-family:inherit;cursor:pointer}
 .act .ix{font-family:var(--mono);color:var(--gold);font-size:12px;flex:none;width:18px}
 .act .x{font-size:13px}
 
+/* ---- trading system V3 ---- */
+.sys-decision{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:12px}
+.sys-decision .label{font-size:11px;color:var(--tx3);letter-spacing:.04em;text-transform:uppercase}
+.sys-decision .main{font-family:var(--disp);font-size:30px;font-weight:800;line-height:1.05;margin-top:4px}
+.sys-pill{display:inline-flex;align-items:center;border:1px solid var(--line2);border-radius:999px;padding:4px 9px;font-size:11px;color:var(--tx2);white-space:nowrap}
+.sys-list{display:flex;flex-direction:column;gap:8px}
+.sys-item{display:flex;gap:9px;align-items:flex-start;font-size:12.5px;color:var(--tx2);padding:8px 0;border-bottom:1px dashed var(--line)}
+.sys-item:last-child{border-bottom:0}
+.sys-mark{width:18px;height:18px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex:none;margin-top:1px}
+.sys-ok{background:var(--up-bg);color:var(--up)}
+.sys-warn{background:var(--warn-bg);color:var(--warn)}
+.sys-stop{background:var(--down-bg);color:var(--down)}
+.sys-na{background:var(--card2);color:var(--tx3)}
+.sys-order{padding:10px 0;border-bottom:1px solid var(--line);font-size:13px}
+.sys-order:last-child{border-bottom:0}
+.sys-order b{font-family:var(--disp)}
+
 /* ---- events ---- */
 .ev{display:flex;gap:12px;padding:11px 0;border-bottom:1px solid var(--line);align-items:center}
 .ev:last-child{border-bottom:0}
@@ -246,7 +263,24 @@ button{font-family:inherit;cursor:pointer}
     </div>
   </div>
 
-  <!-- ====== 模块三：持仓建议分析 ====== -->
+  <!-- ====== 模块三：交易体系 V3 ====== -->
+  <div class="sec"><h2>交易体系 V3 · 今日操作</h2><span class="tag">5万实盘规则</span><div class="ln"></div></div>
+  <div class="grid" style="grid-template-columns:1.05fr 1fr 1.25fr;margin-bottom:18px">
+    <div class="card">
+      <h3>最终动作 <span class="help" data-logic="systemv3">?</span></h3>
+      <div id="systemDecision"></div>
+    </div>
+    <div class="card">
+      <h3>硬条件核对</h3>
+      <div id="systemChecklist"></div>
+    </div>
+    <div class="card">
+      <h3>可执行操作</h3>
+      <div id="systemOrders"></div>
+    </div>
+  </div>
+
+  <!-- ====== 模块四：持仓建议分析 ====== -->
   <div class="sec"><h2>持仓建议分析</h2><div class="ln"></div></div>
   <div class="grid" style="grid-template-columns:1fr 1.3fr 1fr">
     <div class="card">
@@ -348,16 +382,34 @@ button{font-family:inherit;cursor:pointer}
 const CONFIG = {
   // 满仓指数 = 四项子分(0~100, 越高越偏多)的加权和；权重之和需 = 1
   positionWeights: { trend:0.30, valuation:0.20, sentiment:0.25, eventRisk:0.25 },
-  positionFloor: 10, positionCap: 85,           // 你的周期为 1-3 个月，保留动态现金缓冲
+  positionFloor: 10, positionCap: 70,           // V3：常态总持仓不超过 70%，现金不低于 30%
   accountBaseCapital: 50000,                    // 当前操作资金规模（美元）
+  tradingSystem: {
+    normalMaxGrossPct: 70,
+    cashReservePct: 30,
+    singleStockMaxPct: 20,
+    singleStockMaxUsd: 10000,
+    sectorMaxPct: 40,
+    sectorMaxUsd: 20000,
+    aiThemeMaxPct: 60,
+    aiThemeMaxUsd: 30000,
+    defenseAmmoUsd: 10000,
+    defenseMaxDays: 42,
+    normalCircuitPct: -22,
+    defenseCircuitPct: -16,
+    hardCircuitPct: -25,
+    stopLossPct: 15,
+    panicStopLossPct: 20,
+    earningsReduceDays: 7,
+  },
   // 恐慌指数权重（越高越恐慌）
   panicWeights: { vix:0.50, fearGreed:0.30, breadth:0.20 },
   vixBuyTrigger: 50,    // 兼容旧引用：最高档阈值
   // VIX 分档抄底信号（逆向）：达到某档即触发对应力度的分批买入
   vixTiers: [
-    {min:30, label:'一档 · 轻度恐慌', deploy:25,  tone:'mild',    txt:'市场进入恐慌区，可小幅试探性分批建仓（约计划资金的 25%）。'},
-    {min:40, label:'二档 · 明显恐慌', deploy:50,  tone:'strong',  txt:'恐慌明显，加大分批买入力度（约计划资金的 50%），优先低位龙头。'},
-    {min:50, label:'三档 · 极端恐慌', deploy:100, tone:'extreme', txt:'极端恐慌，历史上常接近阶段性底部，按计划重点买入，但仍分批、不一次满仓。'},
+    {min:20, label:'一档 · 开始恐慌', deploy:12, tone:'mild', budgetMin:10, budgetMax:15, tranches:2, txt:'VIX 20-30：只在价格确认后投入当前净值的 10%-15%，分 2 笔。'},
+    {min:30, label:'二档 · 显著恐慌', deploy:25, tone:'strong', budgetMin:20, budgetMax:30, tranches:3, txt:'VIX 30-50：只在价格确认后投入当前净值的 20%-30%，分 3 笔。'},
+    {min:50, label:'三档 · 极端恐慌', deploy:40, tone:'extreme', budgetMin:40, budgetMax:45, tranches:5, txt:'VIX >50：只买指数ETF和盈利龙头，投入当前净值的 40%+，分 3-5 笔跨日执行。'},
   ],
   // 止损：取「跟踪止损」与「ATR止损」中更高（更近）的一个
   trailStopPct: 0.15,   // 自近期高点回撤 15% 触发
@@ -366,10 +418,10 @@ const CONFIG = {
   rsiOverbought: 70, rsiOversold: 42,
   addUpsidePct: 15,     // 上行空间 > 15% 且未超买 → 倾向加仓
   trimUpsidePct: 3,     // 上行空间 < 3% 或已超买 → 倾向减仓/止盈
-  earningsWarnDays: 3,  // 财报前 N 天预警
+  earningsWarnDays: 7,  // V3：财报前 7 天进入减仓/回避窗口
   // 组合集中度阈值
-  maxSingleWeight: 50,  // 单票上限 %（用户确认：不超过 50%）
-  maxSectorWeight: 75,  // 纳指100/半导体/AI 组合允许较高行业集中，但仍提示风险
+  maxSingleWeight: 20,  // V3：单票上限 20% / $10,000
+  maxSectorWeight: 40,  // V3：单行业上限 40% / $20,000
 };
 
 /* =====================================================================
@@ -638,10 +690,12 @@ const DataProvider = {
     if(USE_MOCK) return store.market;
     try {
       const syms = ['SPY','QQQ','DIA','IWM','VIXY'];
-      const [status,data,vixR] = await Promise.all([
+      const [status,data,vixR,spyTech,qqqTech] = await Promise.all([
         fetchJSON(PROXY + '/api/status', {ok:false,missing:[]}, 8000),
         fetchJSON(PROXY + '/api/batch?syms=' + syms.join(','), [], 12000),
         fetchJSON(PROXY + '/api/vix', {}, 10000),
+        fetchJSON(PROXY + '/api/technicals/SPY', {}, 12000),
+        fetchJSON(PROXY + '/api/technicals/QQQ', {}, 12000),
       ]);
       const arr=Array.isArray(data)?data:[];
       const find = s => arr.find(x => x.sym === s) || {};
@@ -652,11 +706,16 @@ const DataProvider = {
       const warnings=[];
       if(status.missing && status.missing.length) warnings.push('缺少环境变量: '+status.missing.join('/'));
       if(!isNum(vixR.vix)) warnings.push('VIX缺失');
+      if(!spyTech || spyTech.ok===false || !isNum(spyTech.sma200)) warnings.push('SPY 200日线缺失');
+      if(!qqqTech || qqqTech.ok===false || !isNum(qqqTech.sma200)) warnings.push('QQQ 200日线缺失');
+      const techs={SPY:(spyTech&&spyTech.ok!==false)?spyTech:null, QQQ:(qqqTech&&qqqTech.ok!==false)?qqqTech:null};
+      const breadthVals=[techs.SPY?.above200, techs.QQQ?.above200].filter(v=>typeof v==='boolean');
       return {
         ...store.market,
         asOf: new Date().toLocaleString('zh-CN'),
         vix: isNum(vixR.vix) ? vixR.vix : null,
-        fearGreed: null, breadthAbove200: null, spx1mReturn: null, erp: null,
+        fearGreed: null, breadthAbove200: breadthVals.length ? breadthVals.filter(Boolean).length/breadthVals.length*100 : null, spx1mReturn: null, erp: null,
+        systemTech: techs,
         dataStatus: status, dataWarnings: warnings,
         indices: [
           mk('SPY','SPY·标普'), mk('QQQ','QQQ·纳指'), mk('DIA','DIA·道指'),
@@ -671,7 +730,7 @@ const DataProvider = {
       const base=await loadRemotePortfolio();
       const positions = await Promise.all((base.positions||[]).map(async h => {
         const sym=encodeURIComponent(h.sym);
-        const [q, m, t, prof, rsiR, atrR, earnR] = await Promise.all([
+        const [q, m, t, prof, rsiR, atrR, earnR, techR] = await Promise.all([
           fetchJSON(PROXY + '/api/quote/' + sym, {}),
           fetchJSON(PROXY + '/api/metrics/' + sym, {}),
           fetchJSON(PROXY + '/api/target/' + sym, {}),
@@ -679,6 +738,7 @@ const DataProvider = {
           fetchJSON(PROXY + '/api/rsi/' + sym, {}),
           fetchJSON(PROXY + '/api/atr/' + sym, {}),
           fetchJSON(PROXY + '/api/earnings/' + sym, {}),
+          fetchJSON(PROXY + '/api/technicals/' + sym, {}),
         ]);
         const warnings=[];
         if(!isNum(q.c) || q.c<=0) warnings.push('现价缺失');
@@ -688,6 +748,7 @@ const DataProvider = {
         if(!isNum(rsiR.rsi)) warnings.push('RSI缺失');
         if(!isNum(atrR.atr)) warnings.push('ATR缺失');
         if(earnR.error) warnings.push('财报日期缺失');
+        if(techR.error || techR.ok===false) warnings.push('均线数据缺失');
         const pxCurrency=(prof.currency||q.currency||h.currency||'USD').toUpperCase();
         if(h.currency && pxCurrency && h.currency!==pxCurrency) warnings.push('币种不一致 '+pxCurrency+'/'+h.currency);
         const metric=m.metric||{};
@@ -703,6 +764,7 @@ const DataProvider = {
           earnDays: isNum(earnR.earnDays) ? earnR.earnDays : null,
           earnDate: earnR.date || null,
           earnSource: earnR.source || null,
+          tech: techR && techR.ok!==false ? techR : null,
           dataWarnings:warnings,
           quoteSource:q.source||null, quoteAsOf:q.asOf||null,
           targetSource:t.source||null,
@@ -988,8 +1050,9 @@ function buildAlerts(port,events,vixSig){
 }
 
 // 行动清单（把告警与个股建议汇总成“要不要动手”）
-function buildActions(port,sw,vixSig){
+function buildActions(port,sw,vixSig,system){
   const list=[];
+  if(system) list.push('【V3最终动作】'+system.action+'：'+system.reason);
   if(vixSig.triggered) list.push(`【抄底 ${vixSig.tier.label}】VIX ${vixSig.vix}，部署约计划资金的 ${vixSig.tier.deploy}%，分批买入低位龙头`);
   port.rows.filter(r=>r.tone==='stop').forEach(r=>list.push(`复核 ${r.sym} 止损：现价已破位，决定割肉还是调整止损`));
   port.rows.filter(r=>r.tone==='trim').forEach(r=>list.push(`评估 ${r.sym} 是否止盈/减仓（${isNum(r.upside)?'上行空间 '+r.upside.toFixed(0)+'%':'目标价缺失'}）`));
@@ -997,6 +1060,175 @@ function buildActions(port,sw,vixSig){
   if(Math.abs(sw.gap)>8) list.push(sw.gap>0?`仓位偏低，准备回调加仓计划`:`仓位偏高，列出减仓标的`);
   port.rows.filter(r=>r.tone==='add').forEach(r=>list.push(`关注 ${r.sym} 加仓机会（上行空间 ${r.upside.toFixed(0)}%，RSI ${isNum(r.rsi)?r.rsi:'—'}）`));
   return list.length?list:['本周无紧急操作，维持现状并跟踪事件日历'];
+}
+
+function loadSystemV3Store(){
+  try { return JSON.parse(localStorage.getItem('ledger_system_v3') || '{}') || {}; } catch(e) { return {}; }
+}
+function saveSystemV3Store(v){
+  try { localStorage.setItem('ledger_system_v3', JSON.stringify(v)); } catch(e) {}
+}
+function systemToneClass(tone){
+  if(tone==='ok') return 'sys-ok';
+  if(tone==='stop') return 'sys-stop';
+  if(tone==='warn') return 'sys-warn';
+  return 'sys-na';
+}
+function classifyV3Asset(r){
+  const sym=String(r.sym||'').toUpperCase();
+  if(['QQQ','SPY','DIA','IWM','SMH','SOXX'].includes(sym)) return '指数ETF';
+  if(['OKLO','SMR','NNE'].includes(sym)) return '无收入概念股';
+  return '盈利龙头/核心持仓';
+}
+function isV3AITheme(r){
+  const sym=String(r.sym||'').toUpperCase();
+  return ['NVDA','AMD','AVGO','TSM','ASML','AMAT','LRCX','KLAC','MU','ARM','MRVL','QCOM','MSFT','GOOGL','GOOG','META','AMZN','CEG','VST','TLN','GEV','BWXT','CCJ','OKLO','SMR','NNE','SMH','SOXX','QQQ','DRAM'].includes(sym) || /semiconductor|software|technology|ai|power|utilities|energy/i.test(String(r.sector||''));
+}
+function updateSystemV3Memory(mode, port){
+  const st=loadSystemV3Store();
+  const today=localDateKey();
+  const currentTotal=isNum(port.total)?port.total:CONFIG.accountBaseCapital;
+  st.highWater=Math.max(isNum(st.highWater)?st.highWater:CONFIG.accountBaseCapital, currentTotal);
+  if(mode==='防御模式'){
+    if(!st.defenseStartedAt) st.defenseStartedAt=today;
+  } else if(mode==='常态模式') {
+    st.defenseStartedAt=null;
+  }
+  if(!isNum(st.defenseAddsUsd)) st.defenseAddsUsd=0;
+  saveSystemV3Store(st);
+  return st;
+}
+function v3DaysSince(dateStr){
+  if(!dateStr) return 0;
+  const t=new Date(dateStr+'T00:00:00').getTime();
+  if(!Number.isFinite(t)) return 0;
+  return Math.max(0, Math.floor((Date.now()-t)/864e5));
+}
+function computeSystemV3(market, port, events){
+  const cfg=CONFIG.tradingSystem;
+  const spy=market.systemTech?.SPY || null;
+  const qqq=market.systemTech?.QQQ || null;
+  const missing=[];
+  if(!spy || !isNum(spy.sma200)) missing.push('SPY 200日线');
+  if(!qqq || !isNum(qqq.sma200)) missing.push('QQQ 200日线');
+  if(!isNum(market.vix)) missing.push('VIX');
+  const hasRegime=!missing.includes('SPY 200日线') && !missing.includes('QQQ 200日线');
+  let mode='数据不足';
+  if(hasRegime) mode=(spy.above200 && qqq.above200) ? '常态模式' : '防御模式';
+  const memory=updateSystemV3Memory(mode, port);
+  const drawdown=memory.highWater>0 ? (port.total/memory.highWater-1)*100 : 0;
+  const defenseDays=v3DaysSince(memory.defenseStartedAt);
+  let circuit=null;
+  if(drawdown<=cfg.hardCircuitPct) circuit={level:'硬止损线', tone:'stop', text:'净值从高点回撤达到 '+drawdown.toFixed(1)+'%，要求现金不低于 70%，冷静期 30 天。'};
+  else if(mode==='防御模式' && drawdown<=cfg.defenseCircuitPct) circuit={level:'防御回撤线', tone:'stop', text:'防御模式回撤 '+drawdown.toFixed(1)+'%，停止加仓，并把总持仓降到 40%以内。'};
+  else if(mode==='常态模式' && drawdown<=cfg.normalCircuitPct) circuit={level:'常态回撤线', tone:'stop', text:'常态模式回撤 '+drawdown.toFixed(1)+'%，停止加仓，只做减仓和复盘。'};
+  const vix=isNum(market.vix)?market.vix:null;
+  let tier=null;
+  if(vix!==null){ for(const t of CONFIG.vixTiers){ if(vix>=t.min) tier=t; } }
+  const qConfirm=qqq && (mode==='防御模式' ? (qqq.above10 || qqq.daysAbove10>=2) : (qqq.above5 || qqq.highVolumeGreen));
+  const sConfirm=spy && (mode==='防御模式' ? (spy.above10 || spy.daysAbove10>=2) : (spy.above5 || spy.highVolumeGreen));
+  const confirmed=!!(qConfirm || sConfirm);
+  const grossPct=port.total>0?port.equity/port.total*100:0;
+  const cashPct=port.total>0?port.cash/port.total*100:0;
+  const aiThemePct=port.total>0?port.rows.filter(isV3AITheme).reduce((s,r)=>s+(isNum(r.mv)?r.mv:0),0)/port.total*100:0;
+  const topSingle=port.rows.slice().sort((a,b)=>(b.weight||0)-(a.weight||0))[0]||null;
+  const overSingle=topSingle && (topSingle.weight>cfg.singleStockMaxPct || topSingle.mv>cfg.singleStockMaxUsd);
+  const overSector=port.maxSector && port.maxSector[1]>cfg.sectorMaxPct;
+  const overAI=aiThemePct>cfg.aiThemeMaxPct;
+  const defenseTimeGate=mode==='防御模式' && defenseDays>=cfg.defenseMaxDays;
+  const defenseAmmoGate=mode==='防御模式' && memory.defenseAddsUsd>=cfg.defenseAmmoUsd;
+  const earningsSoon=port.rows.filter(r=>isNum(r.earnDays)&&r.earnDays<=cfg.earningsReduceDays);
+  const dataGaps=missing.slice();
+  dataGaps.push('券商只读/成交接口未接入：防御期累计加仓金额、真实最高净值、成交后止损单仍需手动核对');
+  const checks=[
+    {label:'大盘模式', value: mode==='数据不足'?'缺 200日线':mode+'（SPY '+(spy&&spy.above200?'在200日线上':'未站上200日线')+' / QQQ '+(qqq&&qqq.above200?'在200日线上':'未站上200日线')+'）', tone: mode==='常态模式'?'ok':mode==='防御模式'?'warn':'na'},
+    {label:'VIX 分档', value: vix===null?'缺 VIX':(vix<15?'VIX '+vix+'：低波动，优先止盈和保留现金':tier?('VIX '+vix+'：'+tier.label):('VIX '+vix+'：观察，不主动加仓')), tone: vix===null?'na':(vix<15?'warn':tier?'ok':'na')},
+    {label:'价格确认', value: confirmed?'指数已满足确认（5日线/10日线或放量阳线）':'尚未满足价格确认，不追买', tone: confirmed?'ok':'warn'},
+    {label:'仓位上限', value:'总持仓 '+grossPct.toFixed(0)+'% / 现金 '+cashPct.toFixed(0)+'% / AI主题 '+aiThemePct.toFixed(0)+'%', tone:(grossPct<=cfg.normalMaxGrossPct && cashPct>=cfg.cashReservePct && !overSingle && !overSector && !overAI)?'ok':'warn'},
+    {label:'回撤熔断', value:circuit?circuit.text:('高水位 $'+Math.round(memory.highWater).toLocaleString()+'，当前回撤 '+drawdown.toFixed(1)+'%'), tone:circuit?'stop':'ok'},
+  ];
+  let action='等待';
+  let tone='warn';
+  let reason='先等硬条件齐全。';
+  let budgetMin=0, budgetMax=0, tranches=0;
+  if(missing.length){
+    action='禁止新增';
+    tone='stop';
+    reason='缺少 '+missing.join('、')+'，不能生成买入建议。';
+  } else if(circuit){
+    action='禁止加仓';
+    tone='stop';
+    reason=circuit.level+'已触发，只允许减仓、止损、提高现金。';
+  } else if(defenseTimeGate || defenseAmmoGate){
+    action='防御暂停买入';
+    tone='stop';
+    reason=(defenseTimeGate?'防御模式已持续约 '+defenseDays+' 天；':'')+(defenseAmmoGate?'防御弹药已用满；':'')+'只做减仓/止盈/止损。';
+  } else if(vix!==null && vix<15){
+    action='减仓兑现';
+    tone='warn';
+    reason='VIX < 15，体系要求主动兑现盈利、现金回到 30%以上。';
+  } else if(tier && confirmed && grossPct<cfg.normalMaxGrossPct && cashPct>cfg.cashReservePct && !overSingle && !overSector && !overAI){
+    action='允许分批加仓';
+    tone='ok';
+    budgetMin=port.total*tier.budgetMin/100;
+    budgetMax=port.total*tier.budgetMax/100;
+    tranches=tier.tranches;
+    if(mode==='防御模式'){ budgetMin/=2; budgetMax/=2; reason=tier.label+' + 防御模式：买入预算减半，仅限指数ETF和盈利龙头。'; }
+    else reason=tier.label+' + 价格确认通过：按 V3 分批执行。';
+  } else if(tier && !confirmed){
+    action='等待确认';
+    tone='warn';
+    reason=tier.label+' 已触发，但指数还没有价格确认，暂不买。';
+  } else if(overSingle || overSector || overAI || grossPct>=cfg.normalMaxGrossPct || cashPct<cfg.cashReservePct){
+    action='先降集中度';
+    tone='warn';
+    reason='组合已触及仓位/集中度红线，先减高集中持仓或提高现金。';
+  } else {
+    action='持有观察';
+    tone='na';
+    reason='VIX未打开买入闸门，保持仓位并跟踪事件/财报。';
+  }
+  const orders=[];
+  if(action==='允许分批加仓'){
+    orders.push('本轮可用预算 $'+Math.round(budgetMin).toLocaleString()+'-$'+Math.round(budgetMax).toLocaleString()+'，分 '+tranches+' 笔跨日执行。');
+    orders.push(mode==='防御模式'?'优先 QQQ/SPY；盈利龙头小仓位；OKLO/SMR/NNE 等概念股防御期禁止新增。':'优先 QQQ/SPY + 当前盈利龙头；单票买后不得超过 $10,000 或 20%。');
+  }
+  if(action==='减仓兑现') orders.push('检查盈利 20%-40% 的持仓，至少兑现一半，并把现金比例恢复到 30%+。');
+  if(action==='先降集中度') orders.push('先处理超上限项：单票 20%/$10k、行业 40%/$20k、AI主题 60%/$30k。');
+  if(circuit) orders.push(circuit.text);
+  earningsSoon.forEach(r=>orders.push(r.sym+' 距财报 '+r.earnDays+' 天：按 V3 财报前减仓/回避规则处理。'));
+  port.rows.forEach(r=>{
+    const type=classifyV3Asset(r);
+    if(isNum(r.pnlPct) && r.pnlPct<=-cfg.stopLossPct) orders.push(r.sym+' 浮亏 '+r.pnlPct.toFixed(1)+'%：达到硬止损区，优先止损或降仓。');
+    else if(type==='无收入概念股' && isNum(r.pnlPct) && r.pnlPct<0) orders.push(r.sym+' 属概念股且低于成本：禁止摊平，只能止损/减仓/等待。');
+    else if(r.tech && r.tech.below50) orders.push(r.sym+' 跌破50日线：按体系清仓/大幅减仓规则复核。');
+    else if(r.tech && r.tech.below20 && isNum(r.pnlPct) && r.pnlPct>0) orders.push(r.sym+' 跌破20日线且有利润：至少减半保护利润。');
+    else if(isNum(r.pnlPct) && r.pnlPct>=20) orders.push(r.sym+' 盈利 '+r.pnlPct.toFixed(1)+'%：进入分批止盈区，至少兑现一部分。');
+  });
+  if(!orders.length) orders.push(reason);
+  return {action,tone,reason,mode,vix,tier,confirmed,budgetMin,budgetMax,tranches,checks,orders,dataGaps,drawdown,defenseDays,memory,aiThemePct};
+}
+function renderSystemV3(system){
+  if(!system){
+    document.getElementById('systemDecision').innerHTML='<div class="muted">交易体系暂未计算。</div>';
+    document.getElementById('systemChecklist').innerHTML='';
+    document.getElementById('systemOrders').innerHTML='';
+    return;
+  }
+  const col=system.tone==='ok'?'var(--up)':system.tone==='stop'?'var(--down)':system.tone==='warn'?'var(--warn)':'var(--tx2)';
+  const bg=system.tone==='ok'?'var(--up-bg)':system.tone==='stop'?'var(--down-bg)':system.tone==='warn'?'var(--warn-bg)':'var(--card2)';
+  const budget=system.budgetMax>0 ? '<div class="verdict" style="border-color:'+col+'33;background:'+bg+';color:'+col+'">本轮预算 $'+Math.round(system.budgetMin).toLocaleString()+'-$'+Math.round(system.budgetMax).toLocaleString()+'，分 '+system.tranches+' 笔</div>' : '';
+  document.getElementById('systemDecision').innerHTML=
+    '<div class="sys-decision"><div><div class="label">V3 最终动作</div><div class="main" style="color:'+col+'">'+cleanText(system.action)+'</div></div><span class="sys-pill">'+cleanText(system.mode)+'</span></div>'+
+    '<div class="verdict" style="font-size:13px;line-height:1.6">'+cleanText(system.reason)+'</div>'+budget+
+    '<div class="muted" style="font-size:11.5px;margin-top:10px">高水位 $'+Math.round(system.memory.highWater||0).toLocaleString()+' · 回撤 '+system.drawdown.toFixed(1)+'%'+(system.defenseDays?' · 防御约 '+system.defenseDays+' 天':'')+'</div>';
+  document.getElementById('systemChecklist').innerHTML='<div class="sys-list">'+system.checks.map(function(c){
+    const mark=c.tone==='ok'?'✓':c.tone==='stop'?'!':c.tone==='warn'?'!':'-';
+    return '<div class="sys-item"><span class="sys-mark '+systemToneClass(c.tone)+'">'+mark+'</span><span><b>'+cleanText(c.label)+'</b><br>'+cleanText(c.value)+'</span></div>';
+  }).join('')+'</div>';
+  document.getElementById('systemOrders').innerHTML=system.orders.map(function(o,i){
+    return '<div class="sys-order"><b class="mono">'+String(i+1).padStart(2,'0')+'</b> '+cleanText(o)+'</div>';
+  }).join('')+'<div class="muted" style="font-size:11px;margin-top:10px">缺口提示：'+cleanText(system.dataGaps.slice(0,2).join(' / '))+'</div>';
 }
 
 async function getAIAdvice(market,port,pos,panic,sw,events,alerts){
@@ -1017,7 +1249,7 @@ async function getAIAdvice(market,port,pos,panic,sw,events,alerts){
         targetSource:r.targetSource,dataWarnings:r.dataWarnings||[],
       })),
     },
-    model:{position:pos,panic,ruleSwitch:sw,ruleActions:buildActions(port,sw,computeVixSignal(market))},
+    model:{position:pos,panic,ruleSwitch:sw,systemV3:state.system||null,ruleActions:buildActions(port,sw,computeVixSignal(market),state.system||null)},
     events, alerts,
     dataQuality:{
       sources:market.dataStatus?.sources||{},
@@ -1043,8 +1275,9 @@ async function load(){
   const sw=computeSwitch(pos,port);
   const vixSig=computeVixSignal(market);
   const alerts=buildAlerts(port,events,vixSig);
-  const actions=buildActions(port,sw,vixSig);
-  state={market,port,pos,panic,sw,vixSig,alerts,actions,events,snap,pfRaw,dips,ai:null,aiPending:USE_AI};
+  const system=computeSystemV3(market,port,events);
+  const actions=buildActions(port,sw,vixSig,system);
+  state={market,port,pos,panic,sw,vixSig,system,alerts,actions,events,snap,pfRaw,dips,ai:null,aiPending:USE_AI};
   render();
   if(USE_AI){
     getAIAdvice(market,port,pos,panic,sw,events,alerts)
@@ -1067,7 +1300,7 @@ async function load(){
 }
 
 function render(){
-  const {market,port,pos,panic,sw,vixSig,alerts,actions,events,pfRaw,dips,ai,aiPending}=state;
+  const {market,port,pos,panic,sw,vixSig,system,alerts,actions,events,pfRaw,dips,ai,aiPending}=state;
   document.getElementById('upd').textContent='数据截至 '+market.asOf+' · '+statusLine(market);
 
   // ticker
@@ -1117,6 +1350,8 @@ function render(){
 
   // actions
   document.getElementById('actions').innerHTML=actions.map((x,i)=>`<div class="act"><span class="ix">${(i+1).toString().padStart(2,'0')}</span><span class="x">${cleanText(x)}</span></div>`).join('');
+
+  renderSystemV3(system);
 
   // panic
   document.getElementById('panicNum').textContent=panic.v;
@@ -1230,7 +1465,7 @@ function render(){
 
   const missing=(market.dataStatus?.missing||[]).join(' / ');
   document.getElementById('disclaimer').innerHTML=
-    '风险提示：行情优先来自 <b>Polygon Snapshot</b>，FMP 用作行情兜底并提供基本面、目标价、技术指标、财报与宏观日历；Claude 只读取页面已校验的数据，不直接编造价格或新闻。'
+    '风险提示：行情优先来自 <b>Polygon Snapshot</b>，FMP 用作行情兜底并提供基本面、目标价、技术指标、财报、宏观日历与 200日线；交易体系 V3 按硬规则输出动作，Claude 只读取页面已校验的数据做解释与复核，不直接编造价格或新闻。'
     +(missing?' 当前仍缺少环境变量：<b>'+cleanText(missing)+'</b>。':'')
     +' 若接口返回缺失、延迟、过期或币种不一致，看板会在持仓行标出并把对应字段显示为 <b>—</b>。满仓指数、恐慌指数、止损位与调仓建议仍是工具化模型输出，不构成投资建议；任何买卖、仓位与止损决策请自行确认或咨询持牌投资顾问。';
 }
@@ -1256,15 +1491,18 @@ function renderGauge(val, current){
 
 /* ---- 计算逻辑说明（in-app） ---- */
 const LOGIC={
+  systemv3:{title:'交易体系 V3 今日操作',sub:'按你的 5万美金实盘体系生成可执行建议',
+    formula:'优先级：净值熔断 → SPY/QQQ 200日线市场模式 → VIX分档 → 价格确认 → 仓位/行业/AI主题上限 → 个股止损/止盈/财报。\\n\\n常态：SPY/QQQ在200日线上，最多70%持仓、30%现金。\\n防御：指数跌破200日线，买入预算减半，概念股禁止新增。\\n熔断：常态回撤-22%、防御-16%、硬线-25%。',
+    body:['这是规则引擎，不靠AI自由发挥。缺关键数据时默认禁止新增。','VIX只负责打开买入闸门，真正买入还要等指数价格确认。','单票上限20%或$10,000，行业上限40%，AI主题上限60%。']},
   position:{title:'满仓指数 / 建议仓位',sub:'四维加权打分，输出 0~100% 建议仓位',
     formula:`建议仓位 = round( Σ 子分ᵢ × 权重ᵢ / 5 ) × 5\n\n趋势(30%)  = 0.5×宽度 + 0.5×动量\n估值(20%)  = 50 + (ERP−历史均值)/1.5 ×30   [Fed模型]\n情绪(25%)  = 0.6×(100−(VIX−12)×4) + 0.4×恐贪\n事件(25%)  = 100 − 未来14天高影响事件强度×7`,
-    body:['子分均归一到 0~100，越高越偏多。','情绪项采取风险管理立场：VIX 越高 → 自动降仓。','逆向叠加规则（VIX 分档抄底）：VIX ≥30 一档（部署约25%）、≥40 二档（约50%）、≥50 三档（约100%），命中后在建议仓位卡片、告警与行动清单顶部高亮提示分批买入。','结果取整到 5%，并限制在仓位下限/上限之间。']},
+    body:['子分均归一到 0~100，越高越偏多。','情绪项采取风险管理立场：VIX 越高 → 自动降仓。','V3 逆向买入规则已迁移到“交易体系 V3 今日操作”：VIX 20-30 / 30-50 / >50 分档，但必须通过价格确认。','结果取整到 5%，并限制在仓位下限/上限之间。']},
   panic:{title:'恐慌指数',sub:'0=极度贪婪，100=极度恐慌',
     formula:`恐慌 = 0.50×VIX分 + 0.30×(100−恐贪) + 0.20×(100−宽度)\nVIX分 = (VIX−10)/(40−10) ×100`,
     body:['综合波动率、情绪调查、市场宽度三个口径，避免单一指标失真。']},
   stock:{title:'个股调仓建议',sub:'规则引擎，按优先级判定',
     formula:`止损价 = max( 近高×(1−15%), 现价−2.5×ATR )\n距止损% = (现价−止损)/现价\n上行空间% = (目标价−现价)/现价\n\n现价≤止损          → 触发止损\n上行<3% 或 RSI≥70  → 减仓/止盈\n上行>15% 且 RSI≤42 → 可考虑加仓\n其余                → 持有`,
-    body:['止损取「跟踪止损」与「ATR止损」中更近的一个，更保守。','财报前 3 天额外打出预警标记。']},
+    body:['止损取「跟踪止损」与「ATR止损」中更近的一个，更保守。','V3 规则下财报前 7 天额外进入减仓/回避窗口。']},
   risk:{title:'风险 / 止损面板',sub:'组合层面的集中度与波动',
     formula:`单票占比 = 个股市值 / 总资产\n行业HHI  = Σ(行业权重)²   (0~1，越大越集中)\n组合Beta = Σ 个股Beta × 权重`,
     body:[`单票 >${CONFIG.maxSingleWeight}% 或单行业 >${CONFIG.maxSectorWeight}% 触发集中度红旗。`,'最大回撤来自历史净值曲线，衡量下行幅度。']},
