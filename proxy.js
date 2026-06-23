@@ -43,6 +43,8 @@ const POLYGON = 'https://api.polygon.io';
 const FMP_V3 = 'https://financialmodelingprep.com/api/v3';
 const FMP_V4 = 'https://financialmodelingprep.com/api/v4';
 const FMP_STABLE = 'https://financialmodelingprep.com/stable';
+const DIP_CACHE_TTL_MS = 15 * 60 * 1000;
+let dipLeadersCache = null;
 
 function cleanSym(sym) {
   return String(sym || '').trim().toUpperCase().replace(/[^A-Z0-9.:\-\^]/g, '');
@@ -361,22 +363,23 @@ function dipLogic(sym, profile, q, target, rsi, scoreParts) {
 
 async function buildDipCandidate(sym) {
   const s = cleanSym(sym);
-  const [q, target, profile, rsi] = await Promise.all([
-    quoteFor(s),
-    fmpTarget(s).catch(e => ({ ok: false, targetMean: null, error: providerError(e) })),
-    fmpProfile(s).catch(e => ({ ok: false, symbol: s, name: s, sector: null, industry: null, error: providerError(e) })),
-    fmpIndicator(s, 'rsi').catch(() => null),
-  ]);
+  const q = await fmpQuoteStable(s).catch(() => quoteFor(s));
   const price = num(q.price || q.c);
   const high52 = num(q.yearHigh);
   const low52 = num(q.yearLow);
   if (!price || !high52 || !low52 || high52 <= low52) return null;
   const drawdown = pctOrNull(high52 - price, high52);
   const rangePos = pctOrNull(price - low52, high52 - low52);
-  const targetMean = num(target.targetMean);
-  const upside = targetMean ? pctOrNull(targetMean - price, price) : null;
   if (drawdown === null || drawdown < 8) return null;
   if (rangePos !== null && rangePos > 78) return null;
+
+  const [target, profile, rsi] = await Promise.all([
+    fmpTarget(s).catch(e => ({ ok: false, targetMean: null, error: providerError(e) })),
+    fmpProfile(s).catch(e => ({ ok: false, symbol: s, name: s, sector: null, industry: null, error: providerError(e) })),
+    fmpIndicator(s, 'rsi').catch(() => null),
+  ]);
+  const targetMean = num(target.targetMean);
+  const upside = targetMean ? pctOrNull(targetMean - price, price) : null;
 
   let score = 0;
   score += Math.min(35, drawdown * 0.8);
@@ -421,11 +424,24 @@ async function mapLimit(items, limit, worker) {
 }
 
 async function dipLeaders(limit = 8) {
-  const rows = await mapLimit(DIP_UNIVERSE, 5, buildDipCandidate);
+  const rows = await mapLimit(DIP_UNIVERSE, 3, buildDipCandidate);
   return rows
     .filter(r => r && !r.error && r.price && r.high52)
     .sort((a, b) => b.score - a.score)
     .slice(0, limit);
+}
+
+function dipLeadersPayload(items, limit, extra = {}) {
+  return {
+    ok: true,
+    items,
+    universe: 'nasdaq100,semis,ai',
+    policy: { capitalUsd: 50000, maxSingleWeightPct: 20, normalMaxGrossPct: 70, cashReservePct: 30, horizon: '1-3 months', delayedQuotesAccepted: true },
+    source: 'FMP quote/profile/target/RSI + Polygon/FMP quote fallback',
+    asOf: new Date().toISOString(),
+    limit,
+    ...extra,
+  };
 }
 
 function indicatorSlugs(type) {
@@ -991,17 +1007,27 @@ app.get('/api/target/:sym', async (req, res) => {
 
 app.get('/api/dip-leaders', async (req, res) => {
   const limit = Math.max(3, Math.min(12, num(req.query.limit) || 8));
+  const force = String(req.query.refresh || '') === '1';
+  const now = Date.now();
+  if (!force && dipLeadersCache && now - dipLeadersCache.savedAt < DIP_CACHE_TTL_MS) {
+    return res.json(dipLeadersPayload(dipLeadersCache.items.slice(0, limit), limit, {
+      cached: true,
+      cacheAgeSec: Math.round((now - dipLeadersCache.savedAt) / 1000),
+    }));
+  }
   try {
     const items = await dipLeaders(limit);
-    res.json({
-      ok: true,
-      items,
-      universe: 'nasdaq100,semis,ai',
-      policy: { capitalUsd: 50000, maxSingleWeightPct: 20, normalMaxGrossPct: 70, cashReservePct: 30, horizon: '1-3 months', delayedQuotesAccepted: true },
-      source: 'FMP quote/profile/target/RSI + Polygon/FMP quote fallback',
-      asOf: new Date().toISOString(),
-    });
+    if (items.length) dipLeadersCache = { savedAt: now, items };
+    res.json(dipLeadersPayload(items, limit, { cached: false }));
   } catch (e) {
+    if (dipLeadersCache && dipLeadersCache.items.length) {
+      return res.json(dipLeadersPayload(dipLeadersCache.items.slice(0, limit), limit, {
+        cached: true,
+        stale: true,
+        warning: '低位候选筛选接口本次刷新失败，已返回上一次成功结果',
+        error: providerError(e),
+      }));
+    }
     res.status(500).json({ ok: false, items: [], error: providerError(e), source: 'dip leaders screener' });
   }
 });
