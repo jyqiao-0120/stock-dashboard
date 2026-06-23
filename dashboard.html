@@ -446,6 +446,21 @@ const FETCH_TIMEOUT_MS = 12000;
 
 function isNum(v){ return typeof v === 'number' && Number.isFinite(v); }
 function toNumber(v){ const n=Number(v); return Number.isFinite(n)?n:null; }
+function firstNum(...vals){
+  for(const v of vals){
+    const n=toNumber(v);
+    if(n!==null) return n;
+  }
+  return null;
+}
+function freshUrl(url){
+  if(!/^https?:/i.test(url)) return url;
+  const u=new URL(url);
+  if(u.origin===new URL(PROXY).origin && !u.searchParams.has('_fresh')){
+    u.searchParams.set('_fresh', Date.now().toString(36));
+  }
+  return u.toString();
+}
 function cleanText(v){
   return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -598,7 +613,8 @@ async function fetchJSON(url, fallback=null, timeoutMs=FETCH_TIMEOUT_MS, options
   const ctrl=new AbortController();
   const timer=setTimeout(()=>ctrl.abort(), timeoutMs);
   try{
-    const res=await fetch(url,{...options,signal:ctrl.signal});
+    const requestUrl=(options && options.method && options.method.toUpperCase()!=='GET') ? url : freshUrl(url);
+    const res=await fetch(requestUrl,{cache:'no-store',...options,signal:ctrl.signal});
     const json=await res.json().catch(()=>fallback);
     if(!res.ok){
       const err=(json&&json.error)||res.statusText||('HTTP '+res.status);
@@ -749,13 +765,15 @@ const DataProvider = {
         if(!isNum(atrR.atr)) warnings.push('ATR缺失');
         if(earnR.error) warnings.push('财报日期缺失');
         if(techR.error || techR.ok===false) warnings.push('均线数据缺失');
+        const price=firstNum(q.c, q.price, q.lastPrice, q.close, q.dayClose);
+        const chg=firstNum(q.dp, q.changesPercentage, q.changePercentage, q.percentChange);
         const pxCurrency=(prof.currency||q.currency||h.currency||'USD').toUpperCase();
         if(h.currency && pxCurrency && h.currency!==pxCurrency) warnings.push('币种不一致 '+pxCurrency+'/'+h.currency);
         const metric=m.metric||{};
         return {
           ...h,
-          price:    (isNum(q.c) && q.c>0) ? q.c : null,
-          chg:      isNum(q.dp) ? q.dp : null,
+          price:    (price!==null && price>0) ? price : null,
+          chg:      chg!==null ? chg : null,
           sector:   prof.sector || prof.finnhubIndustry || prof.industry || h.sector || null,
           high:     metric['52WeekHigh'] || metric.yearHigh || null,
           target:   t.targetMean || t.targetConsensus || null,
@@ -776,7 +794,8 @@ const DataProvider = {
           fetchJSON(PROXY + '/api/quote/' + sym, {}),
           fetchJSON(PROXY + '/api/target/' + sym, {}),
         ]);
-        return {...w,price:(isNum(q.c)&&q.c>0)?q.c:null,target:t.targetMean||null,quoteSource:q.source||null};
+        const price=firstNum(q.c, q.price, q.lastPrice, q.close, q.dayClose);
+        return {...w,price:(price!==null&&price>0)?price:null,target:t.targetMean||null,quoteSource:q.source||null};
       }));
       return { ...base, positions, watchlist };
     } catch(e) { console.warn('getPortfolio 失败', e); return { ...store.portfolio, positions: store.portfolio.positions.map(h=>({...h,price:null,chg:null,sector:h.sector||null,high:null,target:null,rsi:null,atr:null,earnDays:null,dataWarnings:['远端数据不可用']})) }; }
@@ -801,7 +820,9 @@ const DataProvider = {
     if(USE_MOCK) return mock.dipLeaders;
     try {
       const r = await fetchJSON(PROXY + '/api/dip-leaders?universe=nasdaq100,semis,ai&limit=8', {items:[]}, 30000);
-      return Array.isArray(r.items) ? r.items : [];
+      if(Array.isArray(r.items) && r.items.length) return r.items;
+      if(r && r.error) return [{_error:true, error:r.error, source:r.source||'dip leaders screener'}];
+      return [];
     } catch(e) {
       console.warn('getDipLeaders 自动筛选失败', e);
       return [];
@@ -1443,7 +1464,8 @@ function render(){
 
   // dip leaders（低位头部股票 · 抄底候选）
   const liveDips=Array.isArray(dips)?dips:[];
-  document.getElementById('dipGrid').innerHTML=liveDips.length?liveDips.map(d=>{
+  const dipError=liveDips.find(d=>d && d._error);
+  document.getElementById('dipGrid').innerHTML=dipError?('<div class="muted" style="font-size:12.5px;padding:10px 0">低位头部股票筛选接口异常：'+cleanText(dipError.error)+'。来源：'+cleanText(dipError.source||'后端筛选器')+'</div>'):liveDips.length?liveDips.map(d=>{
     const off=(isNum(d.high52)&&isNum(d.price)&&d.high52>0)?(d.high52-d.price)/d.high52*100:null;
     const up=(isNum(d.target)&&isNum(d.price)&&d.price>0)?(d.target-d.price)/d.price*100:null;
     const rangePos=(isNum(d.price)&&isNum(d.low52)&&isNum(d.high52)&&d.high52>d.low52)?clamp((d.price-d.low52)/(d.high52-d.low52)*100,0,100):50;
@@ -1460,7 +1482,7 @@ function render(){
       <div class="logic"><b>筛选依据：</b>${cleanText(d.logic||'真实行情筛选，等待更多基本面数据确认。')}</div>
       <small class="muted" style="display:block;margin-top:8px">来源：${cleanText(d.source||'FMP + Polygon fallback')} ${d.asOf?' · '+shortStamp(d.asOf):''}${d.delayed?' · 延迟行情':''}</small>
     </div>`;
-  }).join(''):'<div class="muted" style="font-size:12.5px;padding:10px 0">低位头部股票筛选暂无结果；请确认 FMP_KEY 可用，或稍后刷新。</div>';
+  }).join(''):'<div class="muted" style="font-size:12.5px;padding:10px 0">低位头部股票筛选暂无结果；接口可能正在刷新或当前筛选条件没有候选。请点击右上角刷新。</div>';
 
 
   const missing=(market.dataStatus?.missing||[]).join(' / ');
