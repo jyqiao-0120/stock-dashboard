@@ -44,7 +44,9 @@ const FMP_V3 = 'https://financialmodelingprep.com/api/v3';
 const FMP_V4 = 'https://financialmodelingprep.com/api/v4';
 const FMP_STABLE = 'https://financialmodelingprep.com/stable';
 const DIP_CACHE_TTL_MS = 15 * 60 * 1000;
+const MODULE_CACHE_TTL_MS = 15 * 60 * 1000;
 let dipLeadersCache = null;
+let sectorModulesCache = null;
 
 function cleanSym(sym) {
   return String(sym || '').trim().toUpperCase().replace(/[^A-Z0-9.:\-\^]/g, '');
@@ -104,6 +106,17 @@ function pctOrNull(numerator, denominator) {
   const a = num(numerator);
   const b = num(denominator);
   return a !== null && b ? a / b * 100 : null;
+}
+
+function clampNum(v, min, max) {
+  const n = num(v);
+  if (n === null) return null;
+  return Math.max(min, Math.min(max, n));
+}
+
+function avgNums(values) {
+  const xs = values.map(num).filter(v => v !== null);
+  return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
 }
 
 async function getJSON(url, options = {}) {
@@ -351,6 +364,18 @@ const DIP_UNIVERSE = [
   'INTC','ADI','NXPI','ON','SMH','SOXX','QQQ','COST','BKNG','INTU'
 ];
 
+const STOCK_MODULES = [
+  { id: 'ai-platforms', name: 'AI 平台 / 大模型', theme: 'AI 应用与模型基础设施', symbols: ['NVDA','MSFT','GOOGL','META','PLTR','AVGO','AMD','ARM'], leaderHints: ['NVDA','MSFT','GOOGL'] },
+  { id: 'semis-core', name: '核心半导体', theme: 'GPU、CPU、代工与芯片设计', symbols: ['NVDA','AMD','AVGO','TSM','ARM','QCOM','TXN','MRVL'], leaderHints: ['NVDA','TSM','AVGO'] },
+  { id: 'semi-equipment', name: '半导体设备', theme: '晶圆制造设备与供应链', symbols: ['ASML','AMAT','LRCX','KLAC','ADI','NXPI','ON','SMH'], leaderHints: ['ASML','AMAT','KLAC'] },
+  { id: 'memory-cycle', name: '存储 / 周期芯片', theme: '存储、周期弹性与行业 ETF', symbols: ['MU','DRAM','MRVL','INTC','ON','SOXX','SMH'], leaderHints: ['MU','SMH','SOXX'] },
+  { id: 'cloud-security', name: '云软件 / 安全', theme: 'SaaS、云平台与网络安全', symbols: ['CRM','NOW','SNOW','ADBE','CRWD','PANW','DDOG','NET','ORCL'], leaderHints: ['CRM','NOW','PANW'] },
+  { id: 'mega-internet', name: '平台互联网', theme: '广告、搜索、电商与内容平台', symbols: ['GOOGL','META','AMZN','NFLX','BKNG'], leaderHints: ['GOOGL','META','AMZN'] },
+  { id: 'consumer-tech', name: '消费科技 / 电动车', theme: '硬件生态、电动车与会员零售', symbols: ['AAPL','TSLA','COST','INTU','NFLX'], leaderHints: ['AAPL','TSLA','COST'] },
+  { id: 'power-energy', name: 'AI 电力 / 能源', theme: 'AI 算力的电力与能源链条', symbols: ['CEG','VST','GEV','ETN','NEE','SMR'], leaderHints: ['CEG','VST','GEV'] },
+  { id: 'broad-etfs', name: '宽基 / 行业 ETF', theme: '指数风格与板块轮动代理', symbols: ['QQQ','SPY','SOXX','SMH','IWM','DIA'], leaderHints: ['QQQ','SPY','SMH'] },
+];
+
 function dipLogic(sym, profile, q, target, rsi, scoreParts) {
   const sector = profile.sector || profile.industry || '科技/成长';
   const bits = [];
@@ -427,6 +452,87 @@ async function mapLimit(items, limit, worker) {
   }
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
   return out;
+}
+
+async function buildModuleStock(sym) {
+  const s = cleanSym(sym);
+  const [q, target, profile, rsi] = await Promise.all([
+    quoteFor(s),
+    fmpTarget(s).catch(e => ({ ok: false, targetMean: null, error: providerError(e) })),
+    fmpProfile(s).catch(e => ({ ok: false, symbol: s, name: s, sector: null, industry: null, error: providerError(e) })),
+    fmpIndicator(s, 'rsi').catch(() => null),
+  ]);
+  const price = num(q.price || q.c);
+  if (!price) return null;
+  const chg = num(q.dp);
+  const high52 = num(q.yearHigh);
+  const low52 = num(q.yearLow);
+  const rangePos = high52 && low52 && high52 > low52 ? clampNum((price - low52) / (high52 - low52) * 100, 0, 100) : null;
+  const targetMean = num(target.targetMean);
+  const upside = targetMean ? pctOrNull(targetMean - price, price) : null;
+  const momentumScore = chg === null ? 50 : clampNum(50 + chg * 6, 0, 100);
+  let rangeScore = 50;
+  if (rangePos !== null) {
+    rangeScore = rangePos < 25 ? 42 + rangePos * 0.9 : rangePos <= 75 ? 65 + (rangePos - 25) * 0.32 : Math.max(45, 82 - (rangePos - 75) * 1.15);
+  }
+  const rsiScore = rsi === null ? 50 : clampNum(100 - Math.abs(rsi - 55) * 2.1, 0, 100);
+  const upsideScore = upside === null ? 50 : clampNum(50 + upside, 0, 100);
+  const score = round(momentumScore * 0.35 + rangeScore * 0.25 + rsiScore * 0.20 + upsideScore * 0.20, 1);
+  const liquidity = q.volume ? Math.min(18, Math.log10(Math.max(1, q.volume)) * 2) : 0;
+  return {
+    sym: s,
+    name: profile.name || s,
+    sector: profile.sector || profile.industry || '—',
+    price: round(price),
+    chg: chg === null ? null : round(chg, 2),
+    volume: num(q.volume),
+    target: targetMean ? round(targetMean) : null,
+    upside: upside === null ? null : round(upside, 1),
+    rsi,
+    low52: low52 ? round(low52) : null,
+    high52: high52 ? round(high52) : null,
+    rangePos: rangePos === null ? null : round(rangePos, 1),
+    score,
+    leaderScore: round(score + liquidity, 1),
+    source: [q.source || 'quote', target.source || 'target', 'FMP Profile/RSI'].filter(Boolean).join(' + '),
+    asOf: q.asOf || null,
+    delayed: q.delayed === true,
+    warnings: q.warnings || [],
+  };
+}
+
+async function sectorModules(stockLimit = 6) {
+  const syms = [...new Set(STOCK_MODULES.flatMap(m => m.symbols).map(cleanSym).filter(Boolean))];
+  const rows = await mapLimit(syms, 4, buildModuleStock);
+  const bySym = new Map(rows.filter(r => r && !r.error && r.price).map(r => [r.sym, r]));
+  return STOCK_MODULES.map(m => {
+    const stocks = m.symbols.map(cleanSym).map(s => bySym.get(s)).filter(Boolean);
+    if (!stocks.length) return null;
+    const advancersPct = stocks.length ? stocks.filter(s => num(s.chg) !== null && s.chg >= 0).length / stocks.length * 100 : null;
+    const avgChange = avgNums(stocks.map(s => s.chg));
+    const avgScore = avgNums(stocks.map(s => s.score)) || 0;
+    const avgUpside = avgNums(stocks.map(s => s.upside));
+    const avgRsi = avgNums(stocks.map(s => s.rsi));
+    const leaderBonus = s => (m.leaderHints || []).includes(s.sym) ? 12 : 0;
+    const sorted = stocks.slice().sort((a, b) => (b.score + leaderBonus(b)) - (a.score + leaderBonus(a)));
+    const leaders = stocks.slice().sort((a, b) => (b.leaderScore + leaderBonus(b)) - (a.leaderScore + leaderBonus(a))).slice(0, 3);
+    const moduleScore = clampNum(avgScore * 0.70 + (advancersPct || 50) * 0.20 + (leaders[0] ? leaders[0].score : 50) * 0.10, 0, 100);
+    return {
+      id: m.id,
+      name: m.name,
+      theme: m.theme,
+      score: round(moduleScore, 1),
+      trend: moduleScore >= 72 ? '强势' : moduleScore >= 58 ? '偏强' : moduleScore >= 45 ? '中性' : '偏弱',
+      avgChange: avgChange === null ? null : round(avgChange, 2),
+      advancersPct: advancersPct === null ? null : round(advancersPct, 0),
+      avgUpside: avgUpside === null ? null : round(avgUpside, 1),
+      avgRsi: avgRsi === null ? null : round(avgRsi, 0),
+      leaders,
+      stocks: sorted.slice(0, stockLimit),
+      source: 'Polygon/FMP quote + FMP target/profile/RSI',
+      asOf: leaders.find(x => x.asOf)?.asOf || null,
+    };
+  }).filter(Boolean).sort((a, b) => b.score - a.score);
 }
 
 async function dipLeaders(limit = 8) {
@@ -949,6 +1055,7 @@ function statusPayload() {
       tradingSystemV3: FMP_KEY ? '5万实盘版规则引擎：200日线/VIX/价格确认/仓位上限/止损/财报' : 'missing FMP_KEY for market regime',
       events: FMP_KEY ? 'FMP Economic/Earnings Calendar + curated Fed schedule' : 'curated Fed schedule only; missing FMP_KEY',
       dipLeaders: FMP_KEY ? 'FMP quote/profile/target/RSI over Nasdaq100 + Semis + AI universe' : 'missing',
+      sectorModules: FMP_KEY ? 'Polygon/FMP quote + FMP target/profile/RSI grouped by AI/Semis/Cloud/ETF modules' : 'missing',
       ai: ANTHROPIC_API_KEY ? 'Claude API' : 'missing',
       holdings: REPO && GTOKEN ? 'GitHub Contents API' : 'missing',
     },
@@ -1020,6 +1127,51 @@ app.get('/api/metrics/:sym', async (req, res) => {
 app.get('/api/target/:sym', async (req, res) => {
   try { res.json(await fmpTarget(req.params.sym)); }
   catch (e) { res.json({ ok: false, targetMean: null, targetMedian: null, source: 'FMP Price Target Consensus', error: providerError(e) }); }
+});
+
+app.get('/api/sector-modules', async (req, res) => {
+  const limit = Math.max(3, Math.min(10, num(req.query.limit) || 6));
+  const force = String(req.query.refresh || '') === '1';
+  const now = Date.now();
+  if (!force && sectorModulesCache && now - sectorModulesCache.savedAt < MODULE_CACHE_TTL_MS) {
+    return res.json({
+      ok: true,
+      modules: sectorModulesCache.modules,
+      universe: 'AI, semiconductors, cloud software, internet platforms, consumer tech, power/energy, ETFs',
+      policy: { scoring: '0-100 objective score from price momentum, 52-week position, RSI, analyst upside, advancer breadth' },
+      source: 'Polygon/FMP quote + FMP target/profile/RSI',
+      cached: true,
+      cacheAgeSec: Math.round((now - sectorModulesCache.savedAt) / 1000),
+      asOf: new Date().toISOString(),
+    });
+  }
+  try {
+    const modules = await sectorModules(limit);
+    if (modules.length) sectorModulesCache = { savedAt: now, modules };
+    res.json({
+      ok: true,
+      modules,
+      universe: 'AI, semiconductors, cloud software, internet platforms, consumer tech, power/energy, ETFs',
+      policy: { scoring: '0-100 objective score from price momentum, 52-week position, RSI, analyst upside, advancer breadth' },
+      source: 'Polygon/FMP quote + FMP target/profile/RSI',
+      cached: false,
+      asOf: new Date().toISOString(),
+    });
+  } catch (e) {
+    if (sectorModulesCache && sectorModulesCache.modules.length) {
+      return res.json({
+        ok: true,
+        modules: sectorModulesCache.modules,
+        cached: true,
+        stale: true,
+        warning: '模块行情接口本次刷新失败，已返回上一次成功结果',
+        error: providerError(e),
+        source: 'Polygon/FMP quote + FMP target/profile/RSI',
+        asOf: new Date().toISOString(),
+      });
+    }
+    res.status(500).json({ ok: false, modules: [], error: providerError(e), source: 'sector modules screener' });
+  }
 });
 
 app.get('/api/dip-leaders', async (req, res) => {

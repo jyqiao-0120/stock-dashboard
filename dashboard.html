@@ -191,6 +191,27 @@ button{font-family:inherit;cursor:pointer}
 .logic b{color:var(--tx);font-weight:500}
 @media(max-width:760px){#dipGrid{grid-template-columns:1fr!important}}
 
+/* ---- sector modules ---- */
+#moduleGrid{grid-template-columns:repeat(2,1fr)}
+.module-head{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;margin-bottom:12px}
+.module-title{font-family:var(--disp);font-size:17px;font-weight:700;letter-spacing:-.01em}
+.module-theme{color:var(--tx3);font-size:11px;margin-top:2px}
+.module-score{font-family:var(--disp);font-size:30px;font-weight:800;line-height:1;text-align:right}
+.module-score small{display:block;font-family:var(--sans);font-size:10.5px;color:var(--tx3);font-weight:400;margin-top:3px}
+.module-meta{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);border-radius:9px;overflow:hidden;margin:10px 0 12px}
+.module-meta .m{background:var(--card);padding:9px 10px;min-width:0}
+.module-meta .k{font-size:10.5px;color:var(--tx3);white-space:nowrap}
+.module-meta .v{font-family:var(--mono);font-size:13px;margin-top:2px;white-space:nowrap}
+.module-leaders{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 12px}
+.leader-chip{border:1px solid var(--line2);border-radius:999px;padding:4px 9px;font-size:11.5px;background:var(--card2);white-space:nowrap}
+.module-table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+.module-table th{color:var(--tx3);font-size:10px;font-weight:500;text-align:right;padding:0 6px 7px;border-bottom:1px solid var(--line);white-space:nowrap}
+.module-table th:first-child,.module-table td:first-child{text-align:left}
+.module-table td{text-align:right;padding:7px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+.module-table tr:last-child td{border-bottom:0}
+.score-pill{display:inline-flex;min-width:38px;justify-content:center;border-radius:7px;padding:2px 7px;background:var(--card2);font-family:var(--mono);font-size:11.5px}
+@media(max-width:900px){#moduleGrid{grid-template-columns:1fr!important}.module-meta{grid-template-columns:repeat(2,1fr)}}
+
 /* manage holdings */
 .mgr-modal .modal-box{max-width:860px}
 .mgr-table{width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:8px}
@@ -323,6 +344,9 @@ button{font-family:inherit;cursor:pointer}
       <div id="watchlist"></div>
     </div>
   </div>
+
+  <div class="sec"><h2>板块行情 &amp; 龙头评分 <span class="help" data-logic="modules">?</span></h2><span class="tag">客观评分</span><div class="ln"></div></div>
+  <div class="grid" id="moduleGrid"></div>
 
   <div class="sec"><h2>低位头部股票 · 抄底候选</h2><span class="tag">逆向布局</span><div class="ln"></div></div>
   <div class="grid" id="dipGrid" style="grid-template-columns:repeat(2,1fr)"></div>
@@ -816,6 +840,18 @@ const DataProvider = {
     // 上次查看快照：实盘时存 localStorage / 后端；原型用 mock
     return mock.snapshot;
   },
+  async getSectorModules(){
+    if(USE_MOCK) return mock.sectorModules || [];
+    try {
+      const r = await fetchJSON(PROXY + '/api/sector-modules?limit=6', {modules:[]}, 45000);
+      if(Array.isArray(r.modules) && r.modules.length) return r.modules;
+      if(r && r.error) return [{_error:true, error:r.error, source:r.source||'sector modules screener'}];
+      return [];
+    } catch(e) {
+      console.warn('getSectorModules 板块行情获取失败', e);
+      return [];
+    }
+  },
   async getDipLeaders(){
     if(USE_MOCK) return mock.dipLeaders;
     try {
@@ -875,6 +911,9 @@ const mock = {
     {sym:'PLTR',action:'下调评级',detail:'增持 → 中性',broker:'Citi'},
   ],
   snapshot:{ prevValue:142800, prevAsOf:'昨天 09:41' },
+  sectorModules:[
+    {id:'ai-platforms',name:'AI 平台 / 大模型',theme:'AI 应用与模型基础设施',score:72.5,trend:'强势',avgChange:1.2,advancersPct:75,avgUpside:18.4,avgRsi:58,leaders:[{sym:'NVDA',name:'英伟达',score:81,price:118.4,chg:2.1},{sym:'MSFT',name:'微软',score:76,price:415.3,chg:.7},{sym:'GOOGL',name:'谷歌',score:69,price:165.2,chg:.4}],stocks:[{sym:'NVDA',name:'英伟达',price:118.4,chg:2.1,rsi:58,score:81},{sym:'MSFT',name:'微软',price:415.3,chg:.7,rsi:49,score:76},{sym:'GOOGL',name:'谷歌',price:165.2,chg:.4,rsi:52,score:69}]}
+  ],
   // 低位头部股票（抄底候选）：示例数据，实盘由筛选器 + 分析师共识生成
   dipLeaders:[
     {sym:'NKE', name:'耐克',   sector:'消费', price:74.5,  low52:70.7, high52:123.4, buy:72,  target:95,  logic:'全球运动龙头，库存出清接近尾声，<b>估值回到十年低位</b>；新管理层主导渠道改革，若毛利率企稳有修复空间。'},
@@ -1288,8 +1327,8 @@ async function getAIAdvice(market,port,pos,panic,sw,events,alerts){
    ===================================================================== */
 let state={};
 async function load(){
-  const [market,pfRaw,events,snap,dips]=await Promise.all([
-    DataProvider.getMarket(),DataProvider.getPortfolio(),DataProvider.getEvents(),DataProvider.getSnapshot(),DataProvider.getDipLeaders()]);
+  const [market,pfRaw,events,snap,sectorModules,dips]=await Promise.all([
+    DataProvider.getMarket(),DataProvider.getPortfolio(),DataProvider.getEvents(),DataProvider.getSnapshot(),DataProvider.getSectorModules(),DataProvider.getDipLeaders()]);
   const port=computePortfolio(pfRaw);
   const pos=computePosition(market,events);
   const panic=computePanic(market);
@@ -1298,7 +1337,7 @@ async function load(){
   const alerts=buildAlerts(port,events,vixSig);
   const system=computeSystemV3(market,port,events);
   const actions=buildActions(port,sw,vixSig,system);
-  state={market,port,pos,panic,sw,vixSig,system,alerts,actions,events,snap,pfRaw,dips,ai:null,aiPending:USE_AI};
+  state={market,port,pos,panic,sw,vixSig,system,alerts,actions,events,snap,pfRaw,sectorModules,dips,ai:null,aiPending:USE_AI};
   render();
   if(USE_AI){
     getAIAdvice(market,port,pos,panic,sw,events,alerts)
@@ -1321,7 +1360,7 @@ async function load(){
 }
 
 function render(){
-  const {market,port,pos,panic,sw,vixSig,system,alerts,actions,events,pfRaw,dips,ai,aiPending}=state;
+  const {market,port,pos,panic,sw,vixSig,system,alerts,actions,events,pfRaw,sectorModules,dips,ai,aiPending}=state;
   document.getElementById('upd').textContent='数据截至 '+market.asOf+' · '+statusLine(market);
 
   // ticker
@@ -1462,6 +1501,29 @@ function render(){
     }).join('') : '<div class="muted" style="padding:14px 0;font-size:12.5px">暂无关注标的，可在“管理持仓”里添加。</div>');
 
 
+  // sector modules（板块行情 & 龙头评分）
+  const modules=Array.isArray(sectorModules)?sectorModules:[];
+  const moduleError=modules.find(m=>m && m._error);
+  const moduleGrid=document.getElementById('moduleGrid');
+  if(moduleGrid){
+    const fmtPrice=v=>isNum(v)?'$'+Number(v).toLocaleString(undefined,{maximumFractionDigits:2}):'—';
+    const fmtPct=v=>isNum(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'—';
+    moduleGrid.innerHTML=moduleError?('<div class="muted" style="font-size:12.5px;padding:10px 0">板块行情接口异常：'+cleanText(moduleError.error)+'。来源：'+cleanText(moduleError.source||'后端筛选器')+'</div>'):modules.length?modules.map(m=>{
+      const score=isNum(m.score)?m.score:null;
+      const scoreCls=score==null?'muted':score>=70?'up':score>=55?'warn':'down';
+      const chgCls=isNum(m.avgChange)?(m.avgChange>=0?'up':'down'):'muted';
+      const leaders=(Array.isArray(m.leaders)?m.leaders:[]).slice(0,3);
+      const stocks=(Array.isArray(m.stocks)?m.stocks:[]).slice(0,6);
+      const leaderHtml=leaders.length?leaders.map(l=>'<span class="leader-chip"><b class="sym">'+cleanText(l.sym)+'</b> <span class="muted">'+cleanText(l.name||'')+'</span> <span class="mono '+(isNum(l.chg)?(l.chg>=0?'up':'down'):'muted')+'">'+fmtPct(l.chg)+'</span></span>').join(''):'<span class="muted">暂无龙头数据</span>';
+      const rows=stocks.length?stocks.map(x=>{
+        const xchg=isNum(x.chg)?(x.chg>=0?'up':'down'):'muted';
+        const xscore=isNum(x.score)?x.score:null;
+        return '<tr><td><span class="sym">'+cleanText(x.sym)+'<small>'+cleanText(x.name||'')+'</small></span></td><td class="mono '+xchg+'">'+fmtPct(x.chg)+'</td><td class="mono">'+fmtPrice(x.price)+'</td><td class="mono">'+(isNum(x.rsi)?Math.round(x.rsi):'—')+'</td><td><span class="score-pill '+(xscore==null?'muted':xscore>=70?'up':xscore>=55?'warn':'down')+'">'+(xscore==null?'—':xscore.toFixed(0))+'</span></td></tr>';
+      }).join(''):'<tr><td colspan="5" class="muted">暂无成分股数据</td></tr>';
+      return '<div class="card module-card"><div class="module-head"><div><div class="module-title">'+cleanText(m.name)+'</div><div class="module-theme">'+cleanText(m.theme||'')+'</div></div><div class="module-score '+scoreCls+'">'+(score==null?'—':score.toFixed(0))+'<small>'+cleanText(m.trend||'—')+'</small></div></div><div class="module-meta"><div class="m"><div class="k">平均涨跌</div><div class="v '+chgCls+'">'+fmtPct(m.avgChange)+'</div></div><div class="m"><div class="k">上涨家数</div><div class="v">'+(isNum(m.advancersPct)?m.advancersPct.toFixed(0)+'%':'—')+'</div></div><div class="m"><div class="k">目标空间</div><div class="v '+(isNum(m.avgUpside)?(m.avgUpside>=0?'up':'down'):'muted')+'">'+(isNum(m.avgUpside)?(m.avgUpside>=0?'+':'')+m.avgUpside.toFixed(1)+'%':'—')+'</div></div><div class="m"><div class="k">平均 RSI</div><div class="v">'+(isNum(m.avgRsi)?Math.round(m.avgRsi):'—')+'</div></div></div><div class="module-leaders">'+leaderHtml+'</div><table class="module-table"><thead><tr><th>成分</th><th>涨跌</th><th>现价</th><th>RSI</th><th>评分</th></tr></thead><tbody>'+rows+'</tbody></table><small class="muted" style="display:block;margin-top:10px">来源：'+cleanText(m.source||'Polygon/FMP')+(m.asOf?' · '+shortStamp(m.asOf):'')+'</small></div>';
+    }).join(''):'<div class="muted" style="font-size:12.5px;padding:10px 0">板块行情暂无数据；请确认 FMP_KEY 可用，或稍后刷新。</div>';
+  }
+
   // dip leaders（低位头部股票 · 抄底候选）
   const liveDips=Array.isArray(dips)?dips:[];
   const dipError=liveDips.find(d=>d && d._error);
@@ -1534,6 +1596,9 @@ const LOGIC={
   action:{title:'本周行动清单',sub:'把所有信号汇总成“要不要动手”',
     formula:`扫描全部持仓与仓位缺口，按以下顺序生成待办：\n触发止损 → 止盈减仓 → 财报决策 → 仓位调整 → 加仓机会`,
     body:['这是给不盯盘场景的核心输出：打开看板，照清单逐条确认即可。']},
+  modules:{title:'板块行情 & 龙头评分',sub:'按热门科技/AI模块聚合当前行情',
+    formula:`个股客观分 = 35%日内动量 + 25%52周位置 + 20%RSI健康度 + 20%分析师目标价空间\n模块分 = 70%成分股平均分 + 20%上涨家数比例 + 10%龙头分`,
+    body:['分数用于比较板块强弱和观察轮动，不等同于自动买卖指令。','龙头股票从模块内按客观分、流动性代理和预设头部名单综合选出。','行情来自 Polygon/FMP，若实时权限不足，会使用 FMP 延迟行情兜底。']},
 };
 function openLogic(key){
   const L=LOGIC[key]||LOGIC.position;
