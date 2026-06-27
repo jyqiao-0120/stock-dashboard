@@ -364,7 +364,7 @@ function dipLogic(sym, profile, q, target, rsi, scoreParts) {
 async function buildDipCandidate(sym, opts = {}) {
   const strict = opts.strict !== false;
   const s = cleanSym(sym);
-  const q = await fmpQuoteStable(s).catch(() => quoteFor(s));
+  const q = await quoteFor(s);
   const price = num(q.price || q.c);
   const high52 = num(q.yearHigh);
   const low52 = num(q.yearLow);
