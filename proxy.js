@@ -361,17 +361,21 @@ function dipLogic(sym, profile, q, target, rsi, scoreParts) {
   return (profile.name || sym) + ' 属于 ' + sector + ' 头部/热门链条标的；' + bits.join('，') + '。用于 1-3 个月波段候选，仍需结合财报窗口和仓位上限确认。';
 }
 
-async function buildDipCandidate(sym) {
+async function buildDipCandidate(sym, opts = {}) {
+  const strict = opts.strict !== false;
   const s = cleanSym(sym);
   const q = await fmpQuoteStable(s).catch(() => quoteFor(s));
   const price = num(q.price || q.c);
   const high52 = num(q.yearHigh);
   const low52 = num(q.yearLow);
-  if (!price || !high52 || !low52 || high52 <= low52) return null;
-  const drawdown = pctOrNull(high52 - price, high52);
-  const rangePos = pctOrNull(price - low52, high52 - low52);
-  if (drawdown === null || drawdown < 8) return null;
-  if (rangePos !== null && rangePos > 78) return null;
+  if (!price) return null;
+  const hasRange = high52 && low52 && high52 > low52;
+  const drawdown = hasRange ? pctOrNull(high52 - price, high52) : null;
+  const rangePos = hasRange ? pctOrNull(price - low52, high52 - low52) : null;
+  if (strict) {
+    if (drawdown === null || drawdown < 8) return null;
+    if (rangePos !== null && rangePos > 78) return null;
+  }
 
   const [target, profile, rsi] = await Promise.all([
     fmpTarget(s).catch(e => ({ ok: false, targetMean: null, error: providerError(e) })),
@@ -382,30 +386,32 @@ async function buildDipCandidate(sym) {
   const upside = targetMean ? pctOrNull(targetMean - price, price) : null;
 
   let score = 0;
-  score += Math.min(35, drawdown * 0.8);
+  if (drawdown !== null) score += Math.min(35, drawdown * 0.8);
   if (rangePos !== null) score += Math.max(0, 25 - rangePos * 0.35);
   if (upside !== null) score += Math.max(0, Math.min(30, upside * 0.8));
   if (rsi !== null) score += rsi <= 45 ? 15 : rsi <= 55 ? 8 : rsi <= 65 ? 2 : -10;
   if (['NVDA','MSFT','AVGO','AMD','TSM','ASML','AMAT','LRCX','KLAC','MU','SMH','SOXX','QQQ'].includes(s)) score += 8;
+  if (!strict && score < 12 && upside === null && rsi === null && drawdown === null) return null;
 
-  const buy = round(Math.max(low52, price * 0.97));
+  const buy = round(low52 ? Math.max(low52, price * 0.97) : price * 0.97);
   return {
     sym: s,
     name: profile.name || s,
     sector: profile.sector || profile.industry || '科技/成长',
     price: round(price),
-    low52: round(low52),
-    high52: round(high52),
+    low52: low52 ? round(low52) : null,
+    high52: high52 ? round(high52) : null,
     buy,
     target: targetMean ? round(targetMean) : null,
     rsi,
     score: round(score, 1),
-    drawdown: round(drawdown, 1),
+    drawdown: drawdown === null ? null : round(drawdown, 1),
     upside: upside === null ? null : round(upside, 1),
     source: [q.source || 'quote', target.source || 'target', 'FMP Profile/RSI'].filter(Boolean).join(' + '),
     asOf: q.asOf || null,
     delayed: q.delayed === true,
     warnings: q.warnings || [],
+    screenMode: strict ? 'strict' : 'relaxed',
     logic: dipLogic(s, profile, q, target, rsi, { drawdown, upside }),
   };
 }
@@ -424,11 +430,22 @@ async function mapLimit(items, limit, worker) {
 }
 
 async function dipLeaders(limit = 8) {
-  const rows = await mapLimit(DIP_UNIVERSE, 3, buildDipCandidate);
-  return rows
-    .filter(r => r && !r.error && r.price && r.high52)
+  const strictRows = await mapLimit(DIP_UNIVERSE, 3, sym => buildDipCandidate(sym, { strict: true }));
+  let screenMode = 'strict';
+  let rows = strictRows.filter(r => r && !r.error && r.price);
+
+  if (!rows.length) {
+    screenMode = 'relaxed';
+    const relaxedRows = await mapLimit(DIP_UNIVERSE, 3, sym => buildDipCandidate(sym, { strict: false }));
+    rows = relaxedRows.filter(r => r && !r.error && r.price);
+  }
+
+  const items = rows
     .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
+    .slice(0, limit)
+    .map(r => ({ ...r, screenMode }));
+
+  return { items, screenMode, candidateCount: rows.length };
 }
 
 function dipLeadersPayload(items, limit, extra = {}) {
@@ -1013,17 +1030,33 @@ app.get('/api/dip-leaders', async (req, res) => {
     return res.json(dipLeadersPayload(dipLeadersCache.items.slice(0, limit), limit, {
       cached: true,
       cacheAgeSec: Math.round((now - dipLeadersCache.savedAt) / 1000),
+      screenMode: dipLeadersCache.screenMode,
+      candidateCount: dipLeadersCache.candidateCount,
+      warning: dipLeadersCache.screenMode === 'relaxed' ? '严格低位筛选暂无结果，已显示头部热门板块每日关注候选' : undefined,
     }));
   }
   try {
-    const items = await dipLeaders(limit);
-    if (items.length) dipLeadersCache = { savedAt: now, items };
-    res.json(dipLeadersPayload(items, limit, { cached: false }));
+    const result = await dipLeaders(limit);
+    const items = result.items || [];
+    if (items.length) dipLeadersCache = {
+      savedAt: now,
+      items,
+      screenMode: result.screenMode,
+      candidateCount: result.candidateCount,
+    };
+    res.json(dipLeadersPayload(items, limit, {
+      cached: false,
+      screenMode: result.screenMode,
+      candidateCount: result.candidateCount,
+      warning: result.screenMode === 'relaxed' ? '严格低位筛选暂无结果，已显示头部热门板块每日关注候选' : undefined,
+    }));
   } catch (e) {
     if (dipLeadersCache && dipLeadersCache.items.length) {
       return res.json(dipLeadersPayload(dipLeadersCache.items.slice(0, limit), limit, {
         cached: true,
         stale: true,
+        screenMode: dipLeadersCache.screenMode,
+        candidateCount: dipLeadersCache.candidateCount,
         warning: '低位候选筛选接口本次刷新失败，已返回上一次成功结果',
         error: providerError(e),
       }));
