@@ -16,17 +16,17 @@
       "currency": "USD"
     },
     {
-      "sym": "MSFT",
-      "name": "微软",
-      "shares": 3,
-      "cost": 419.5,
-      "currency": "USD"
-    },
-    {
       "sym": "DRAM",
       "name": "内存ETF",
       "shares": 4,
       "cost": 52,
+      "currency": "USD"
+    },
+    {
+      "sym": "MU",
+      "name": "美光",
+      "shares": 1,
+      "cost": 1079.54,
       "currency": "USD"
     }
   ],
@@ -54,5 +54,5 @@
     }
   ],
   "currency": "USD",
-  "updatedAt": "2026-06-23T17:53:45.246Z"
+  "updatedAt": "2026-06-27T16:38:49.943Z"
 }
